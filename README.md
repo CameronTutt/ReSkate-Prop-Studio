@@ -1,11 +1,13 @@
 
 # 🛹 ReSkate Prop Studio (`v0.32.0`)
 
-<img width="4116" height="1201" alt="Group 6" src="https://github.com/user-attachments/assets/997895a4-9834-4744-98c0-1c0064fa7cbe" />
+<img width="2350" height="1597" alt="Group 172" src="https://github.com/user-attachments/assets/b3d0d0d6-31c3-4db3-9dcf-ac1847d5fe97" />
 
-**Turn any 3D mesh in Blender into a standalone, skateable custom Quick Drop prop for *ReSkate.* in under 2 minutes.**
 
-ReSkate Prop Studio is an open-source Blender add-on (**Blender 4.2 – 5.3+**) that compiles 3D models directly into standalone **ReSkate** prop packs—complete with **1:1 Havok skate & grind physics**, **authentic surface audio** (concrete, wood, metal, brick, grass), **PBR textures & decal cutouts**, **dynamic in-game Spot/Point lights**, **Quick Drop variant stacking**, and **1-click Thunderstore `.zip` packaging**.
+
+**Turn any 3D mesh in Blender into a standalone, skateable custom Quick Drop prop for *ReSkate.* in just a few steps.**
+
+ReSkate Prop Studio is an open-source Blender add-on (**Blender 4.2 – 5.3+**) that compiles 3D models directly into standalone **ReSkate** prop packs—complete with **1:1 Havok skate & grind physics**, **authentic surface audio** (concrete, wood, metal, brick, grass), **PBR textures**, **dynamic in-game Spot/Point lights**, **Quick Drop variant stacking**, and **1-click Thunderstore `.zip` packaging**.
 
 > **Zero Donor Hijacking:** Every prop you compile is 100% standalone and additive. Your props are added into their own custom Quick Drop tabs and never overwrite base-game props.
 
