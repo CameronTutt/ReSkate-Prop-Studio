@@ -1,0 +1,17 @@
+# Python / Blender caches
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+Thumbs.db
+
+# Permanent Clean-Room Blocklist: Never commit hidden/vanilla catalogs, raw EBX dumps, or legacy test scripts
+*hidden_catalog*.json
+*imc_catalog*.json
+quickdrop_pack_manifest.json
+all_bk_categories.json
+*.ebx
+noble_dump*
+build_all_4_prop_options.py
+build_standalone_sample_props.py
+bundled_compiler/PropForge/

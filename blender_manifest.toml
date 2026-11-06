@@ -1,0 +1,41 @@
+schema_version = "1.0.0"
+
+id = "sk8_prop_authoring_addon"
+version = "0.32.0"
+name = "ReSkate Prop Studio"
+tagline = "Open-Source Zero-Donor Skate. Prop Authoring & Compiler Suite"
+maintainer = "Crem"
+type = "add-on"
+website = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
+
+tags = [
+  "3D View",
+  "Game Engine",
+  "Import-Export",
+  "Physics",
+  "Pipeline",
+  "UV",
+]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+  "2026 Crem",
+]
+
+[permissions]
+files = "Read and write prop geometry, textures, and mod files"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "*.pyo",
+  ".git/",
+  ".github/",
+  ".vscode/",
+  "*.zip",
+]
