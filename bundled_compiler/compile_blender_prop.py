@@ -44,7 +44,7 @@ import site
 import unicodedata
 import zlib
 
-COMPILER_VERSION = "0.32.3"
+COMPILER_VERSION = "0.33.0"
 os.environ["RESKATE_COMPILER_VERSION"] = COMPILER_VERSION
 PIPELINE_MODE = os.environ.get("RESKATE_PIPELINE_MODE", "FAST_OPTIMIZED").strip().upper()
 LOGGED_INPUT_READS: list[str] = []
@@ -698,6 +698,8 @@ def parse_manifest(manifest_path: Path) -> tuple[list[dict], dict]:
             "description": str(data.get("pack_description") or data.get("description") or "").strip(),
             "deploy_to_mods": bool(data.get("deploy_to_mods", coexist_mode)),
             "mod_icon_path": str(data.get("mod_icon_path") or "").strip(),
+            "has_custom_pack_icon": bool(data.get("has_custom_pack_icon", False)),
+            "use_pack_icon_as_first_prop": bool(data.get("use_pack_icon_as_first_prop", False)),
             "mod_readme_path": str(data.get("mod_readme_path") or "").strip(),
             "compiler_backend": str(data.get("compiler_backend") or "CPU").upper(),
             "compile_pipeline_mode": str(
@@ -735,6 +737,8 @@ def parse_manifest(manifest_path: Path) -> tuple[list[dict], dict]:
             "description": str(data.get("pack_description") or data.get("description") or "").strip(),
             "deploy_to_mods": bool(data.get("deploy_to_mods", coexist_mode)),
             "mod_icon_path": str(data.get("mod_icon_path") or "").strip(),
+            "has_custom_pack_icon": bool(data.get("has_custom_pack_icon", False)),
+            "use_pack_icon_as_first_prop": bool(data.get("use_pack_icon_as_first_prop", False)),
             "mod_readme_path": str(data.get("mod_readme_path") or "").strip(),
             "compiler_backend": str(data.get("compiler_backend") or "CPU").upper(),
             "compile_pipeline_mode": str(
@@ -876,26 +880,24 @@ def _merge_existing_mod_props_if_requested(props_list: list[dict], meta: dict) -
     seen_keys: set[str] = set()
     kept_existing = 0
 
-    for old_p in existing_entries:
-        if not isinstance(old_p, dict):
-            continue
-        pk = _normalize_prop_key(old_p.get("prop_id") or old_p.get("prop_key", ""))
-        if pk in seen_keys or pk in remove_set:
-            continue
-        if pk in new_by_key:
-            merged.append(new_by_key[pk])
-            seen_keys.add(pk)
-        else:
-            glb_p = old_p.get("glb_path")
-            if glb_p and Path(glb_p).exists():
-                merged.append(old_p)
-                seen_keys.add(pk)
-                kept_existing += 1
-
+    # Place newly compiled/ordered props FIRST in their exact user-specified order (`new_order`)
     for pk in new_order:
         if pk not in seen_keys:
             merged.append(new_by_key[pk])
             seen_keys.add(pk)
+
+    # Append any kept existing props from pack_registry.json that were not in the current selection
+    for old_p in existing_entries:
+        if not isinstance(old_p, dict) or bool(old_p.get("is_pack_icon_prop", False)):
+            continue
+        pk = _normalize_prop_key(old_p.get("prop_id") or old_p.get("prop_key", ""))
+        if pk in seen_keys or pk in remove_set or pk.endswith("_pack_icon_tile"):
+            continue
+        glb_p = old_p.get("glb_path")
+        if glb_p and Path(glb_p).exists():
+            merged.append(old_p)
+            seen_keys.add(pk)
+            kept_existing += 1
 
     for mp in merged:
         if isinstance(mp, dict):
@@ -963,6 +965,8 @@ def _persist_mod_props_registry(
         now_iso = datetime.now(timezone.utc).isoformat()
         stored_props = []
         for entry in props_list:
+            if isinstance(entry, dict) and bool(entry.get("is_pack_icon_prop", False)):
+                continue
             p_copy = copy.deepcopy(entry)
             raw_id = p_copy.get("prop_id") or p_copy.get("prop_key", "own_customprops_prop")
             pk = _normalize_prop_key(raw_id)
@@ -1027,6 +1031,168 @@ def _persist_mod_props_registry(
         (src_dir / "props_registry.json").write_text(reg_json, encoding="utf-8")
     except Exception as ex:
         print(f"  [!] Warning: Failed to persist pack registry for {mod_name}: {ex}", flush=True)
+
+
+def _build_pack_icon_tile_glb(glb_path: Path, pphys_glb_path: Path) -> None:
+    """
+    Synthesizes a 0.60m x 0.025m x 0.60m flat square tile GLB in glTF Y-up space
+    (X in [-0.30, +0.30], Y in [0.00, +0.025], Z in [-0.30, +0.30]) with 1:1 UVs (0..1)
+    on the top (+Y) face for the Pack Icon texture, plus a 0.60m x 0.30m x 0.60m
+    (30cm tall, Y in [0.00, +0.30]) 3D box GLB for its Quick Drop placement proxy (`_pphys`).
+    """
+    glb_path.parent.mkdir(parents=True, exist_ok=True)
+    hx = 0.30
+    hz = 0.30
+    y0 = 0.00
+    y1 = 0.025
+
+    verts = np.array([
+        # Top face (+Y = y1), normal (0, 1, 0): X left-to-right (-hx..+hx), Z back-to-front (-hz..+hz)
+        [-hx, y1, +hz], [+hx, y1, +hz], [+hx, y1, -hz], [-hx, y1, -hz],
+        # Bottom face (-Y = y0)
+        [-hx, y0, -hz], [+hx, y0, -hz], [+hx, y0, +hz], [-hx, y0, +hz],
+        # Front face (+Z = +hz)
+        [-hx, y0, +hz], [+hx, y0, +hz], [+hx, y1, +hz], [-hx, y1, +hz],
+        # Back face (-Z = -hz)
+        [+hx, y0, -hz], [-hx, y0, -hz], [-hx, y1, -hz], [+hx, y1, -hz],
+        # Right face (+X = +hx)
+        [+hx, y0, +hz], [+hx, y0, -hz], [+hx, y1, -hz], [+hx, y1, +hz],
+        # Left face (-X = -hx)
+        [-hx, y0, -hz], [-hx, y0, +hz], [-hx, y1, +hz], [-hx, y1, -hz],
+    ], dtype=np.float32)
+
+    uvs = np.array([
+        # Top face: full 0..1 Pack Icon image
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+        # Bottom & thin border faces
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+        [0.0, 0.0], [1.0, 0.0], [1.0, 0.05], [0.0, 0.05],
+        [0.0, 0.95], [1.0, 0.95], [1.0, 1.0], [0.0, 1.0],
+        [0.95, 0.0], [1.0, 0.0], [1.0, 1.0], [0.95, 1.0],
+        [0.0, 0.0], [0.05, 0.0], [0.05, 1.0], [0.0, 1.0],
+    ], dtype=np.float32)
+
+    faces = np.array([
+        [0, 1, 2], [0, 2, 3],       # Top (+Y)
+        [4, 5, 6], [4, 6, 7],       # Bottom (-Y)
+        [8, 9, 10], [8, 10, 11],    # Front (+Z)
+        [12, 13, 14], [12, 14, 15], # Back (-Z)
+        [16, 17, 18], [16, 18, 19], # Right (+X)
+        [20, 21, 22], [20, 22, 23], # Left (-X)
+    ], dtype=np.int32)
+
+    visual = trimesh.visual.TextureVisuals(uv=uvs)
+    tile_tm = trimesh.Trimesh(vertices=verts, faces=faces, visual=visual, process=False)
+    tile_tm.export(str(glb_path))
+
+    # Build a 0.60m x 0.30m x 0.60m (30cm tall) 3D placement proxy box (Y = 0.00m .. +0.30m)
+    pphys_tm = trimesh.creation.box(extents=[0.60, 0.30, 0.60])
+    pphys_tm.apply_translation([0.0, 0.15, 0.0])
+    pphys_tm.export(str(pphys_glb_path))
+
+
+def _ensure_pack_icon_first_prop(props_list: list[dict], meta: dict, staging_dir: Path) -> list[dict]:
+    """
+    When `use_pack_icon_as_first_prop` and `has_custom_pack_icon` are True in `meta` and `mod_icon_path`
+    exists, auto-generates a small square Pack Icon tile prop (`0.60m x 0.60m` flat surface with a
+    `0.60m x 0.30m x 0.60m` 30cm tall Quick Drop placement/grab proxy) and prepends it at index 0 (#1)
+    of `props_list` so Skate. uses the custom Pack Icon as the Quick Drop Tab Icon.
+    """
+    cleaned = [p for p in props_list if isinstance(p, dict) and not bool(p.get("is_pack_icon_prop", False))]
+    if not cleaned:
+        return props_list
+    if not bool(meta.get("use_pack_icon_as_first_prop", False)) or not bool(meta.get("has_custom_pack_icon", False)):
+        return cleaned
+
+    icon_p_str = str(meta.get("mod_icon_path") or "").strip()
+    if not icon_p_str or not Path(icon_p_str).is_file():
+        return cleaned
+
+    try:
+        mod_name = str(meta.get("target_mod_name") or meta.get("pack_name") or "CustomProps").strip()
+        pack_dir = _get_pack_storage_dir(staging_dir, mod_name)
+        icon_prop_dir = pack_dir / "pack_icon_prop"
+        icon_prop_dir.mkdir(parents=True, exist_ok=True)
+
+        glb_path = icon_prop_dir / "pack_icon_tile.glb"
+        pphys_glb_path = icon_prop_dir / "pack_icon_tile_pphys.glb"
+        _build_pack_icon_tile_glb(glb_path, pphys_glb_path)
+
+        tex_path = icon_prop_dir / "pack_icon_tex_1024.png"
+        t256_path = icon_prop_dir / "pack_icon_thumb_256.png"
+        t768_path = icon_prop_dir / "pack_icon_thumb_768.png"
+
+        with Image.open(icon_p_str) as raw_im:
+            rgba = raw_im.convert("RGBA")
+            rgba.resize((1024, 1024), Image.Resampling.LANCZOS).save(str(tex_path), format="PNG")
+            rgba.resize((256, 256), Image.Resampling.LANCZOS).save(str(t256_path), format="PNG")
+            rgba.resize((768, 768), Image.Resampling.LANCZOS).save(str(t768_path), format="PNG")
+
+        first_user_prop = cleaned[0]
+        custom_qd_tab = str(first_user_prop.get("custom_qd_tab") or "").strip()
+        category = str(first_user_prop.get("category") or "Custom Props").strip()
+
+        clean_mod_title = re.sub(r"^[^-]+-", "", mod_name).replace("_", " ").strip() or mod_name
+        mod_slug = re.sub(r"[^a-z0-9_]+", "_", mod_name.lower()).strip("_")[:16] or "pack"
+        prop_id = clamp_slug(f"{mod_slug}_pack_icon_tile", 22)
+        prop_key = clamp_slug(f"own_customprops_{prop_id}", 36)
+
+        icon_prop_entry = {
+            "name": f"{clean_mod_title} Pack Icon",
+            "prop_id": prop_id,
+            "prop_key": prop_key,
+            "display_name": f"{clean_mod_title} Icon Tile",
+            "family_title": "",
+            "category": category,
+            "custom_qd_tab": custom_qd_tab,
+            "glb_path": str(glb_path),
+            "col_glb_path": str(pphys_glb_path),
+            "col_thickened": False,
+            "pphys_glb_path": str(pphys_glb_path),
+            "texture_path": str(tex_path),
+            "material_textures": [],
+            "look_mode": "AS_IS",
+            "atlas_resolution": 1024,
+            "thumb_256_path": str(t256_path),
+            "thumb_768_path": str(t768_path),
+            "collision_mode": "NO_COLLISION",
+            "no_collision_placement_mode": "MATCH_MESH",
+            "placement_proxy_mode": "BOUNDING_BOX",
+            "pphys_target_tris": 12,
+            "max_col_tris": 12,
+            "anti_lip_enabled": False,
+            "anti_lip_sink_m": 0.0,
+            "surface_material_code": 96,
+            "surface_id": "Concrete_Solid",
+            "surface_label": "Pack Icon Tile (No Collision)",
+            "material_surfaces": [],
+            "face_surface_groups": [],
+            "grind_paths": [],
+            "round_rail": False,
+            "enable_custom_textures": True,
+            "roughness_multiplier": 0.65,
+            "metallic_multiplier": 0.0,
+            "specular_multiplier": 0.35,
+            "roughness_map_mix": 0.0,
+            "metallic_map_mix": 0.0,
+            "use_native_771_detail_slots": False,
+            "use_2x2m_detail_shader": False,
+            "albedo_tint": [1.0, 1.0, 1.0],
+            "lights": [],
+            "experimental": {"no_skater_collision": True, "no_collision_placement_mode": "MATCH_MESH"},
+            "decal_shader_mode": "CUTOUT_273",
+            "is_pack_icon_prop": True,
+            "tris": 12,
+        }
+        print(
+            f"  [Pack Icon #1] Prepended '{icon_prop_entry['display_name']}' ({prop_key}) at #1 in pack "
+            f"(0.60x0.60m tile + 30cm tall Quick Drop placement/grab proxy).",
+            flush=True,
+        )
+        return [icon_prop_entry] + cleaned
+    except Exception as ex:
+        print(f"  [!] Warning: Could not synthesize Pack Icon #1 prop ({ex}); continuing without it.", flush=True)
+        return cleaned
 
 
 def _apply_node_transform_safe(g_copy: trimesh.Trimesh, mat: np.ndarray | None) -> None:
@@ -3769,10 +3935,15 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         or bool(exp_cfg.get("is_surface_decal", False))
         or all_vis_decal_overlay
     )
+    is_pack_icon_prop = bool(prop_entry.get("is_pack_icon_prop", False))
     if len(p_v) >= 4:
         p_min = p_v.min(axis=0).copy()
         p_max = np.maximum(p_v.max(axis=0), p_min + 0.025)
-        if no_skater_col_flag and no_col_placement_mode != "MATCH_MESH":
+        if is_pack_icon_prop:
+            # 30cm tall (Y = 0.00m .. +0.30m) 3D placement proxy box so the flat Pack Icon tile is effortless to place & grab!
+            p_min = np.array([-0.30, 0.00, -0.30], dtype=np.float32)
+            p_max = np.array([+0.30, +0.30, +0.30], dtype=np.float32)
+        elif no_skater_col_flag and no_col_placement_mode != "MATCH_MESH":
             # Flat Ground Plane (Floor Decal / Rug): clamp Quick Drop placement proxy (_pphys / res16)
             # to a flat 6cm ground slab spanning the X*Z footprint so even tall 3D props in FLAT_PLANE mode
             # use a flat ground footprint for Quick Drop placement!
@@ -3852,7 +4023,33 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         or bool(exp_cfg.get("is_surface_decal", False))
         or all_vis_decal_overlay
     )
-    if no_skater_col:
+    if is_pack_icon_prop:
+        # Pack Icon Tile (#1 Quick Drop Tab Icon prop):
+        # Build _phys (res17 / ebx31) as a 30cm tall (0.60m x 0.30m x 0.60m, Y = 0.00m .. +0.30m) No_Grind 3D box
+        # so players can easily place it down and pick it back up in Quick Drop without paper-thin raycast issues!
+        icon_grab_tm = trimesh.creation.box(extents=[0.60, 0.30, 0.60])
+        icon_grab_tm.apply_translation([0.0, 0.15, 0.0])
+        degen_packed = apply_grind_mode_to_packed(surface_code, "no_grind")
+        base_col_shapes = [{
+            "mesh": icon_grab_tm,
+            "mode": "convex_hull",
+            "surface_id": "No_Grind",
+            "packed": degen_packed,
+            "round_rail": False,
+        }]
+        grind_col_shapes = []
+        force_exact_flag = False
+        raw_phys_fitted, _, _ = fit_havok_polytope_to_bounds(
+            tpl["res17"],
+            np.array([-0.30, 0.00, -0.30], dtype=np.float32),
+            np.array([+0.30, +0.30, +0.30], dtype=np.float32),
+            degen_packed,
+        )
+        print(
+            "  [Collision] Pack Icon #1 Tile: 30cm tall (0.60x0.30x0.60m) Quick Drop placement & grab proxy enabled.",
+            flush=True,
+        )
+    elif no_skater_col:
         # Quick Drop's "Select / Grab Placed Prop" cursor raycast tests _phys (res17 / ebx31),
         # while active ghost dragging tests _pphys (res16 / ebx32).
         # Build _phys as a wafer-thin +2mm (0.002m) No_Grind ground sheet spanning the decal's X*Z footprint
@@ -4350,6 +4547,9 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             "custom_qd_tab": str(prop_entry.get("custom_qd_tab") or "").strip(),
             "collision_mode": col_mode,
             "surface_id": surface_id,
+            "surface_label": str(prop_entry.get("surface_label") or "").strip(),
+            "material_surfaces": list(prop_entry.get("material_surfaces") or []),
+            "is_pack_icon_prop": bool(prop_entry.get("is_pack_icon_prop", False)),
             "packed": surface_code,
             "shape_packed_list": shape_packed_list,
             "round_rail": round_rail,
@@ -6293,6 +6493,69 @@ def compile_blender_props_package(
             except Exception as ic_err:
                 print(f"  [!] Mod icon.png write skipped: {ic_err}", flush=True)
 
+        _SURFACE_DISPLAY_LABELS = {
+            "concrete_smooth": "Concrete (Smooth)",
+            "concrete_solid": "Concrete (Smooth)",
+            "concrete_rough": "Concrete (Rough)",
+            "concrete_polished": "Concrete (Polished)",
+            "concrete_aggregate": "Concrete (Exposed Aggregate)",
+            "concrete_painted": "Painted Concrete",
+            "asphalt_smooth": "Asphalt (Street)",
+            "asphalt_rough": "Asphalt (Rough)",
+            "brick_coarse": "Brick (Coarse)",
+            "brick_paver": "Brick / Pavers",
+            "marble_tile": "Marble / Tile",
+            "marble": "Marble / Tile",
+            "granite_ledge": "Granite / Stone",
+            "metal_rail": "Metal (Round Rail)",
+            "metal_solid": "Metal (Grindable)",
+            "metal_solid_grindable": "Metal (Grindable)",
+            "metal_grind_pipe_hollow": "Metal (Hollow Pipe)",
+            "metal_hollow": "Metal (Hollow Pipe)",
+            "metal_sheet": "Sheet Metal / Sign",
+            "metal_corrugated": "Corrugated Metal",
+            "metal_grate": "Metal Grate",
+            "metal_chainlink": "Chainlink Fence",
+            "metal_diamond_plate": "Metal Diamond Plate",
+            "wood_plywood": "Wood (Plywood)",
+            "wood_planks": "Wood (Planks / Deck)",
+            "wood_board": "Wood (Planks / Deck)",
+            "wood_log": "Wood (Log / Bark)",
+            "cardboard": "Cardboard",
+            "plastic_solid": "Plastic / Jersey Barrier",
+            "plastic": "Plastic / Jersey Barrier",
+            "glass_solid": "Glass",
+            "rubber_mat": "Rubber",
+            "grass": "Grass",
+            "dirt_earth": "Dirt / Earth",
+            "sand": "Sand",
+            "gravel": "Gravel",
+            "water_puddle": "Water / Puddle",
+            "no_grind": "No-Grind Surface",
+        }
+
+        def _format_prop_surface_display(s: dict) -> str:
+            explicit_lbl = str(s.get("surface_label") or "").strip()
+            if explicit_lbl:
+                return explicit_lbl
+            mat_surfs = [
+                ms for ms in (s.get("material_surfaces") or [])
+                if isinstance(ms, dict)
+                and not bool(ms.get("is_decal_overlay", False))
+                and str(ms.get("surface") or "").strip().lower() not in ("", "default", "decal_overlay")
+            ]
+            if mat_surfs:
+                slot_labels: list[str] = []
+                for ms in mat_surfs:
+                    raw_s = str(ms.get("surface") or "").strip()
+                    mapped = _SURFACE_DISPLAY_LABELS.get(raw_s.lower()) or raw_s.replace("_", " ").strip().title()
+                    if mapped and mapped not in slot_labels:
+                        slot_labels.append(mapped)
+                if slot_labels:
+                    return " + ".join(slot_labels)
+            raw_id = str(s.get("surface_id") or "Concrete_Solid").strip()
+            return _SURFACE_DISPLAY_LABELS.get(raw_id.lower()) or raw_id.replace("_", " ").strip()
+
         def _write_mod_readme_if_present(dest_dir: Path) -> None:
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
@@ -6324,7 +6587,7 @@ def compile_blender_props_package(
                     dname = str(s.get("display_name") or s.get("prop_key", "Prop")).strip()
                     fam_t = str(s.get("family_title") or "—").strip() or "—"
                     cat_t = str(s.get("custom_qd_tab") or s.get("category") or "Custom Props").strip()
-                    surf_t = str(s.get("surface_id") or "Concrete_Solid").strip()
+                    surf_t = _format_prop_surface_display(s)
                     col_t = str(s.get("collision_mode") or "SAME_AS_MESH").strip()
                     lines.append(f"| **{dname}** | {fam_t} | `{cat_t}` | `{surf_t}` | `{col_t}` |")
                 lines.extend([
@@ -6414,7 +6677,7 @@ def compile_blender_props_package(
                         }
                     family_members_map.setdefault(fam_id, []).append(item_key)
 
-                    surf_id = str(s.get("surface_id") or "Concrete_Solid")
+                    surf_id = _format_prop_surface_display(s)
                     col_mode = str(s.get("collision_mode") or "SAME_AS_MESH")
                     desc_str = str(s.get("description") or f"{mod_name} | Surface: {surf_id} | Collision: {col_mode}")[:250]
 
@@ -8043,7 +8306,8 @@ def main():
 
         coexist_flag = bool(meta.get("coexist_mode", True))
         props_list = _merge_existing_mod_props_if_requested(props_list, meta)
-        meta["source_props_list"] = props_list
+        meta["source_props_list"] = list(props_list)
+        props_list = _ensure_pack_icon_first_prop(props_list, meta, staging_root_dir)
 
         emit_step(2, 6, f"Loading Frostbite Bundle 39 templates [{PIPELINE_MODE}]")
         emit_progress(15, "Decompressing Bundle 39 & items.toc templates...")
@@ -8140,6 +8404,10 @@ def main():
                 try:
                     cached_props[idx] = pickle.loads(cp_file.read_bytes())
                     cached_props[idx]["_is_cached"] = True
+                    if isinstance(cached_props[idx].get("spec"), dict):
+                        for _mk in ("surface_label", "material_surfaces", "surface_id", "display_name", "family_title", "custom_qd_tab", "is_pack_icon_prop"):
+                            if _mk in prop_entry and prop_entry[_mk] is not None:
+                                cached_props[idx]["spec"][_mk] = prop_entry[_mk]
                     cache_hit_count += 1
                     dname = sanitize_display_name(prop_entry.get("display_name", "prop"))
                     dt_hit = time.perf_counter() - t_prop_chk

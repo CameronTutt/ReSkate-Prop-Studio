@@ -144,7 +144,11 @@ def get_sanctus_carousel_enum_items(prop_self, context) -> list[tuple]:
     act_obj = getattr(ctx, "active_object", None)
     act_name = act_obj.name if act_obj else ""
     notch_rgb = _props.get_variant_notch_color_rgb(ctx)
-    c_sig = (tuple(o.name for o in sel_meshes), act_name, notch_rgb)
+    c_sig = (
+        tuple((o.name, int(o.get("reskate_pack_sort_order", 999999))) for o in sel_meshes),
+        act_name,
+        notch_rgb,
+    )
     c_ts, prev_sig, prev_items = _SANCTUS_CAROUSEL_ITEMS_CACHE
     if prev_sig == c_sig and (now - c_ts) < 1.0 and prev_items:
         return prev_items
@@ -755,16 +759,27 @@ def _draw_preflight_checklist(layout, context, obj, prop):
             pf_checks = None
 
     pf_box = layout.box()
+    fast_outdated, fast_outdated_cnt, fast_outdated_reason = compiler_bridge.has_any_outdated_thumbnails_fast(context, obj)
     if pf_checks is None:
         pf_head = pf_box.row(align=True)
         pf_head.label(text="Pre-Flight Check (On-Demand & Auto Before Compile)", icon='CHECKMARK')
         run_btn = pf_head.row(align=True)
         run_btn.scale_y = 1.15
         run_btn.operator("reskate.run_preflight_check", text="Run Pre-Flight Check", icon='PLAY')
+        if fast_outdated:
+            thumb_warn_row = pf_box.row(align=True)
+            thumb_warn_row.alert = True
+            thumb_warn_row.label(
+                text=f"⚠️ {fast_outdated_reason}" if fast_outdated_cnt == 1 else f"⚠️ {fast_outdated_cnt} prop thumbnail(s) out of date ({fast_outdated_reason})"
+            )
+            thumb_btn = thumb_warn_row.row(align=True)
+            thumb_btn.alert = False
+            thumb_btn.operator("reskate.rerender_outdated_thumbnails", text="Re-Render Out-of-Date Thumbnails", icon='RENDER_STILL')
         return
 
     non_pass = [c for c in pf_checks if c.get("badge") != "✅"]
     fixable = [c for c in non_pass if c.get("fix_action")]
+    has_pf_thumb_warn = any(c.get("fix_action") == "RERENDER_OUTDATED_THUMBS" and c.get("badge") != "✅" for c in pf_checks)
     if non_pass:
         pf_box.alert = True
     pf_head = pf_box.row(align=True)
@@ -785,6 +800,15 @@ def _draw_preflight_checklist(layout, context, obj, prop):
     if fixable:
         act_sub.operator("reskate.preflight_fix_all", text="Fix All", icon='TOOL_SETTINGS')
 
+    if (has_pf_thumb_warn or fast_outdated) and not show_det:
+        thumb_quick_row = pf_box.row(align=True)
+        thumb_quick_row.alert = False
+        thumb_quick_row.operator(
+            "reskate.rerender_outdated_thumbnails",
+            text="Re-Render Out-of-Date Thumbnails",
+            icon='RENDER_STILL',
+        )
+
     if show_det:
         det_col = pf_box.column(align=True)
         det_col.alert = False
@@ -798,6 +822,12 @@ def _draw_preflight_checklist(layout, context, obj, prop):
                 btn_sub.alert = False
                 if chk["fix_action"] == "GENERATE_SIMPLIFIED_COL":
                     btn_sub.operator("reskate.create_simplified_col_copy", text="Simplify", icon='MOD_DECIM')
+                elif chk["fix_action"] == "RERENDER_OUTDATED_THUMBS":
+                    btn_sub.operator(
+                        "reskate.rerender_outdated_thumbnails",
+                        text=chk.get("fix_label") or "Re-Render Out-of-Date Thumbnails",
+                        icon='RENDER_STILL',
+                    )
                 else:
                     fx = btn_sub.operator("reskate.preflight_fix", text=chk.get("fix_label") or "Fix", icon='TOOL_SETTINGS')
                     fx.fix_action = chk["fix_action"]
@@ -1545,10 +1575,13 @@ def _draw_simple_page4_lights(layout, context, prop, obj):
 
 
 def _draw_clickable_qd_tabs_list(layout, context, prop):
-    """Draws a collapsible twirl-down menu for Quick Drop Tab Names used in the active Prop Pack / scene (defaulted to collapsed)."""
-    if not hasattr(_props, "get_pack_and_scene_qd_tabs"):
+    """Draws a collapsible twirl-down menu for Quick Drop Tab Names used in the current .blend scene (defaulted to collapsed)."""
+    if hasattr(_props, "get_scene_qd_tabs_with_counts"):
+        tabs_info = _props.get_scene_qd_tabs_with_counts(context)
+    elif hasattr(_props, "get_pack_and_scene_qd_tabs"):
+        tabs_info = _props.get_pack_and_scene_qd_tabs(context)
+    else:
         return
-    tabs_info = _props.get_pack_and_scene_qd_tabs(context)
     if not tabs_info:
         return
 
@@ -1559,12 +1592,12 @@ def _draw_clickable_qd_tabs_list(layout, context, prop):
         t_head.prop(
             prop,
             "show_qd_tabs_foldout",
-            text=f"🗂️ Quick Drop Tabs in Pack / Scene ({len(tabs_info)} — Click to Assign)",
+            text=f"🗂️ Quick Drop Tabs in Scene ({len(tabs_info)} — Click to Assign)",
             icon='TRIA_DOWN' if show_qd else 'TRIA_RIGHT',
             emboss=False,
         )
     else:
-        t_head.label(text="Quick Drop Tabs in Pack / Scene (Click to Assign):", icon='BOOKMARKS')
+        t_head.label(text="Quick Drop Tabs in Scene (Click to Assign):", icon='BOOKMARKS')
 
     if not show_qd:
         return
@@ -1700,7 +1733,12 @@ def _draw_simple_page5_identity_thumbnail(layout, context, prop, obj):
         )
 
     if hasattr(prop, "custom_qd_tab"):
-        id_box.prop(prop, "custom_qd_tab", text="Quick Drop Tab Name", icon='ASSET_MANAGER')
+        id_box.prop(prop, "custom_qd_tab", text="Quick Drop Tab", icon='ASSET_MANAGER')
+        def_author_tab = _props.get_default_qd_tab_name(context) if hasattr(_props, "get_default_qd_tab_name") else "CustomProps"
+        if def_author_tab != "CustomProps":
+            hint_qd = id_box.row(align=True)
+            hint_qd.active = False
+            hint_qd.label(text=f"Defaults to Author ('{def_author_tab}') so props sort by author in Quick Drop", icon='INFO')
     _draw_clickable_qd_tabs_list(id_box, context, prop)
     if n_sel >= 2:
         id_box.operator(
@@ -1834,8 +1872,20 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
             mi_row = ts_col.row(align=True)
             mi_row.prop(prop, "mod_icon_path", text="Pack Icon (icon.png)")
             mi_row.operator("reskate.use_prop_thumb_as_mod_icon", text="", icon='IMAGE_DATA')
-            if not (getattr(prop, "mod_icon_path", "") or "").strip():
-                ts_col.label(text="ℹ️ Blank = Automatically uses 1st prop's thumbnail as icon.png", icon='INFO')
+            has_icon_str = bool((getattr(prop, "mod_icon_path", "") or "").strip())
+            if hasattr(prop, "use_pack_icon_as_first_prop"):
+                ts_col.prop(
+                    prop,
+                    "use_pack_icon_as_first_prop",
+                    text="Use Pack Icon as #1 Quick Drop Tile (Sets Tab Icon)",
+                )
+            if not has_icon_str:
+                ts_col.label(text="ℹ️ Blank = Automatically uses #1 prop's thumbnail as icon.png & Tab Icon", icon='INFO')
+            elif bool(getattr(prop, "use_pack_icon_as_first_prop", True)):
+                ts_col.label(
+                    text="✅ Pack Icon auto-generates as Prop #1 (60cm square tile + 30cm tall grab proxy)",
+                    icon='CHECKMARK',
+                )
         if hasattr(prop, "mod_readme_path"):
             ts_col.prop(prop, "mod_readme_path", text="Custom README.md")
             if not (getattr(prop, "mod_readme_path", "") or "").strip():
@@ -1896,18 +1946,72 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
         r_keep.active = False
     r_keep.label(text=f"📦 Keeping: {n_keep}", icon='PACKAGE' if n_keep > 0 else 'DOT')
 
-    if mod_info.get("exists") and mod_info.get("count", 0) > 0:
+    pack_scene_objs = compiler_bridge.get_pack_prop_meshes_in_scene(context, resolved_mod)
+    ordered_scene_objs: list = []
+    seen_scn_names: set[str] = set()
+    for o_cand in (sel_meshes if len(sel_meshes) >= 2 else pack_scene_objs):
+        if o_cand is not None and o_cand.name not in seen_scn_names:
+            seen_scn_names.add(o_cand.name)
+            ordered_scene_objs.append(o_cand)
+    for o_cand in pack_scene_objs:
+        if o_cand is not None and o_cand.name not in seen_scn_names:
+            seen_scn_names.add(o_cand.name)
+            ordered_scene_objs.append(o_cand)
+    if not ordered_scene_objs and sel_meshes:
+        for o_cand in sel_meshes:
+            if o_cand is not None and o_cand.name not in seen_scn_names:
+                seen_scn_names.add(o_cand.name)
+                ordered_scene_objs.append(o_cand)
+
+    pack_order_rows: list[dict] = []
+    seen_row_keys: set[str] = set()
+    reg_keys_set = {
+        str(pd.get("prop_key") or pd.get("slug") or "").strip().lower()
+        for pd in mod_info.get("props_detail", [])
+        if isinstance(pd, dict) and not bool(pd.get("is_pack_icon_prop", False))
+    }
+    for s_obj in ordered_scene_objs:
+        st_o = _props.get_or_init_object_prop_state(s_obj)
+        s_disp = str(st_o.get("prop_display_name") or s_obj.get("reskate_display_name") or s_obj.name).strip()
+        s_key = compiler_bridge.get_prop_slug(context, s_obj)
+        s_key_low = s_key.lower()
+        seen_row_keys.add(s_key_low)
+        pack_order_rows.append({
+            "obj_name": s_obj.name,
+            "display_name": s_disp,
+            "prop_key": s_key,
+            "in_scene": True,
+            "in_registry": s_key_low in reg_keys_set,
+            "is_active": bool(obj and s_obj.name == obj.name),
+        })
+    for p_det in mod_info.get("props_detail", []):
+        if not isinstance(p_det, dict) or bool(p_det.get("is_pack_icon_prop", False)):
+            continue
+        p_name = p_det.get("display_name") or p_det.get("name") or p_det.get("prop_key", "")
+        p_key = p_det.get("prop_key") or p_det.get("slug", "")
+        p_key_low = str(p_key).strip().lower()
+        if p_key_low and p_key_low not in seen_row_keys:
+            seen_row_keys.add(p_key_low)
+            pack_order_rows.append({
+                "obj_name": "",
+                "display_name": p_name,
+                "prop_key": p_key,
+                "in_scene": False,
+                "in_registry": True,
+                "is_active": False,
+            })
+
+    if pack_order_rows or (mod_info.get("exists") and mod_info.get("count", 0) > 0):
         pm_head = pack_box.row(align=True)
-        show_pc = bool(getattr(prop, "show_pack_contents", False))
+        show_pc = bool(getattr(prop, "show_pack_contents", True))
         pc_icon = 'TRIA_DOWN' if show_pc else 'TRIA_RIGHT'
         pm_head.prop(
             prop,
             "show_pack_contents",
-            text=f"Pack Contents ({mod_info['count']} prop(s) in '{resolved_mod}')",
+            text=f"Pack Contents & Prop Order ({len(pack_order_rows)} prop(s) in '{resolved_mod}')",
             icon=pc_icon,
             emboss=False,
         )
-        pack_scene_objs = compiler_bridge.get_pack_prop_meshes_in_scene(context, resolved_mod)
         if pack_scene_objs:
             sel_all_pk = pm_head.operator(
                 "reskate.select_pack_or_scene_props",
@@ -1920,19 +2024,68 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
         if bak_cnt > 0:
             pm_head.operator("reskate.restore_pack_backup", text=f"Restore Backup ({bak_cnt})", icon='LOOP_BACK')
         if show_pc:
-            for p_det in mod_info.get("props_detail", []):
-                p_name = p_det.get("display_name") or p_det.get("name") or p_det.get("prop_key", "")
-                p_key = p_det.get("prop_key") or p_det.get("slug", "")
+            raw_icon_str = (getattr(prop, "mod_icon_path", "") or "").strip()
+            has_custom_icon_prop = bool(raw_icon_str and getattr(prop, "use_pack_icon_as_first_prop", True))
+            if has_custom_icon_prop:
+                ic_row = pack_box.row(align=True)
+                ic_row.label(
+                    text="📌 #1 [Tab Icon]: Custom Pack Icon Tile (60×60cm surface + 30cm tall Quick Drop proxy)",
+                    icon='IMAGE_DATA',
+                )
+            elif len(pack_order_rows) >= 2:
+                hint_row = pack_box.row(align=True)
+                hint_row.label(
+                    text="💡 Prop #1 sets the Quick Drop Tab Icon. Reordering also updates the Carousel (◀ / ▶):",
+                    icon='INFO',
+                )
+
+            n_rows = len(pack_order_rows)
+            for row_idx, r_item in enumerate(pack_order_rows):
+                p_name = r_item["display_name"]
+                p_key = r_item["prop_key"]
+                o_nm = r_item["obj_name"]
+                disp_num = (row_idx + 2) if has_custom_icon_prop else (row_idx + 1)
+                badge_prefix = f"#{disp_num}"
+                if row_idx == 0 and not has_custom_icon_prop:
+                    badge_prefix = "#1 [Tab Icon]"
+
                 p_row = pack_box.row(align=True)
-                p_row.label(text=f"{p_name} ({p_key})", icon='OBJECT_DATA')
+                p_row.label(
+                    text=f"{badge_prefix}: {p_name}",
+                    icon='RADIOBUT_ON' if r_item["is_active"] else 'OBJECT_DATA',
+                )
+
+                if n_rows >= 2:
+                    top_sub = p_row.row(align=True)
+                    top_sub.enabled = row_idx > 0
+                    top_op = top_sub.operator("reskate.reorder_pack_prop", text="", icon='TRIA_UP_BAR')
+                    top_op.obj_name = o_nm
+                    top_op.prop_key = p_key
+                    top_op.direction = 'TOP'
+
+                    up_sub = p_row.row(align=True)
+                    up_sub.enabled = row_idx > 0
+                    up_op = up_sub.operator("reskate.reorder_pack_prop", text="", icon='TRIA_UP')
+                    up_op.obj_name = o_nm
+                    up_op.prop_key = p_key
+                    up_op.direction = 'UP'
+
+                    dn_sub = p_row.row(align=True)
+                    dn_sub.enabled = row_idx < (n_rows - 1)
+                    dn_op = dn_sub.operator("reskate.reorder_pack_prop", text="", icon='TRIA_DOWN')
+                    dn_op.obj_name = o_nm
+                    dn_op.prop_key = p_key
+                    dn_op.direction = 'DOWN'
+
                 sel_op = p_row.operator("reskate.pack_prop_action", text="Select & Frame", icon='RESTRICT_SELECT_OFF')
                 sel_op.action = 'SELECT'
                 sel_op.prop_key = p_key
                 sel_op.display_name = p_name
-                rem_op = p_row.operator("reskate.pack_prop_action", text="", icon='TRASH', emboss=False)
-                rem_op.action = 'REMOVE'
-                rem_op.prop_key = p_key
-                rem_op.display_name = p_name
+                if r_item["in_registry"]:
+                    rem_op = p_row.operator("reskate.pack_prop_action", text="", icon='TRASH', emboss=False)
+                    rem_op.action = 'REMOVE'
+                    rem_op.prop_key = p_key
+                    rem_op.display_name = p_name
 
     # 4. Block Reason Check & Dynamic Compile Button
     block_reason = compiler_bridge.get_compile_block_reason(context)
@@ -3510,7 +3663,7 @@ class RESKATE_PT_card6_export(RESKATE_PT_base, Panel):
             id_box.operator("reskate.reset_stable_prop_key", text="Reset internal key", icon='FILE_REFRESH')
 
         if hasattr(prop, "custom_qd_tab"):
-            id_col.prop(prop, "custom_qd_tab", text="Quick Drop Tab Name", icon='ASSET_MANAGER')
+            id_col.prop(prop, "custom_qd_tab", text="Quick Drop Tab", icon='ASSET_MANAGER')
         _draw_clickable_qd_tabs_list(id_box, context, prop)
 
         sel_meshes_qd = compiler_bridge.get_selected_prop_meshes(context)
@@ -3681,7 +3834,7 @@ class RESKATE_PT_card6_export(RESKATE_PT_base, Panel):
                     if q_filt and q_filt not in p_name.lower() and q_filt not in p_key.lower():
                         continue
                     p_row = pm_box.row(align=True)
-                    p_row.label(text=f"{p_name} ({p_key})", icon='OBJECT_DATA')
+                    p_row.label(text=f"{p_name}", icon='OBJECT_DATA')
                     sel_op = p_row.operator("reskate.pack_prop_action", text="Select & Frame", icon='RESTRICT_SELECT_OFF')
                     sel_op.action = 'SELECT'
                     sel_op.prop_key = p_key

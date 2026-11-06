@@ -95,6 +95,7 @@ def auto_detect_default_paths() -> dict[str, str]:
         "enable_viewport_overlays_master": False,
         "enable_pack_badges_master": False,
         "auto_render_thumbnails_on_compile": False,
+        "suppress_thumb_overwrite_warning": False,
         "origin_ground_z_offset": 0.05,
         "variant_notch_color": [0.18, 0.80, 0.38],
     }
@@ -122,7 +123,12 @@ def load_persisted_user_paths() -> dict:
                     v = str(data.get(k) or "").strip()
                     if v:
                         out[k] = v
-                for bk in ("enable_viewport_overlays_master", "enable_pack_badges_master", "auto_render_thumbnails_on_compile"):
+                for bk in (
+                    "enable_viewport_overlays_master",
+                    "enable_pack_badges_master",
+                    "auto_render_thumbnails_on_compile",
+                    "suppress_thumb_overwrite_warning",
+                ):
                     if bk in data and isinstance(data[bk], bool):
                         out[bk] = bool(data[bk])
                 if "origin_ground_z_offset" in data and isinstance(data["origin_ground_z_offset"], (int, float)):
@@ -153,6 +159,7 @@ def save_persisted_user_paths(
     origin_ground_z_offset: float | None = None,
     variant_notch_color: tuple | list | None = None,
     auto_render_thumbnails_on_compile: bool | None = None,
+    suppress_thumb_overwrite_warning: bool | None = None,
 ):
     global _PERSISTED_USER_PATHS_CACHE
     if getattr(bpy.app, "background", False) and os.environ.get("RESKATE_ALLOW_BG_SAVE_PATHS", "").strip() not in ("1", "true", "TRUE"):
@@ -184,6 +191,11 @@ def save_persisted_user_paths(
             if auto_render_thumbnails_on_compile is not None
             else bool(existing.get("auto_render_thumbnails_on_compile", False))
         )
+        suppress_thumb_warn = (
+            bool(suppress_thumb_overwrite_warning)
+            if suppress_thumb_overwrite_warning is not None
+            else bool(existing.get("suppress_thumb_overwrite_warning", False))
+        )
         orig_z = (
             float(origin_ground_z_offset)
             if origin_ground_z_offset is not None
@@ -211,6 +223,7 @@ def save_persisted_user_paths(
                     "enable_viewport_overlays_master": ov_master,
                     "enable_pack_badges_master": badge_master,
                     "auto_render_thumbnails_on_compile": auto_thumb,
+                    "suppress_thumb_overwrite_warning": suppress_thumb_warn,
                     "origin_ground_z_offset": round(orig_z, 4),
                     "variant_notch_color": v_col,
                 },
@@ -249,6 +262,7 @@ _OVERLAY_PREFS_MEMO: dict[str, object] = {
     "enable_viewport_overlays_master": bool(_INITIAL_PATHS.get("enable_viewport_overlays_master", False)),
     "enable_pack_badges_master": bool(_INITIAL_PATHS.get("enable_pack_badges_master", False)),
     "auto_render_thumbnails_on_compile": bool(_INITIAL_PATHS.get("auto_render_thumbnails_on_compile", False)),
+    "suppress_thumb_overwrite_warning": bool(_INITIAL_PATHS.get("suppress_thumb_overwrite_warning", False)),
     "origin_ground_z_offset": float(_INITIAL_PATHS.get("origin_ground_z_offset", 0.05)),
     "variant_notch_color": list(_INITIAL_PATHS.get("variant_notch_color", [0.18, 0.80, 0.38])),
 }
@@ -272,6 +286,7 @@ def _refresh_overlay_prefs_from_disk() -> None:
                 _OVERLAY_PREFS_MEMO["enable_viewport_overlays_master"] = bool(loaded.get("enable_viewport_overlays_master", False))
                 _OVERLAY_PREFS_MEMO["enable_pack_badges_master"] = bool(loaded.get("enable_pack_badges_master", False))
                 _OVERLAY_PREFS_MEMO["auto_render_thumbnails_on_compile"] = bool(loaded.get("auto_render_thumbnails_on_compile", False))
+                _OVERLAY_PREFS_MEMO["suppress_thumb_overwrite_warning"] = bool(loaded.get("suppress_thumb_overwrite_warning", False))
                 _OVERLAY_PREFS_MEMO["origin_ground_z_offset"] = float(loaded.get("origin_ground_z_offset", 0.05))
                 _OVERLAY_PREFS_MEMO["variant_notch_color"] = list(loaded.get("variant_notch_color", [0.18, 0.80, 0.38]))
     except Exception:
@@ -304,6 +319,44 @@ def is_auto_render_thumbnails_on_compile_enabled(context=None) -> bool:
             pass
     _refresh_overlay_prefs_from_disk()
     return bool(_OVERLAY_PREFS_MEMO.get("auto_render_thumbnails_on_compile", False))
+
+
+def is_suppress_thumb_overwrite_warning_enabled(context=None) -> bool:
+    """Returns True if the user enabled 'Bypass Thumbnail Overwrite Warning (Do Not Ask Again)' in Add-on Preferences."""
+    prefs = get_addon_preferences(context)
+    if prefs is not None and hasattr(prefs, "suppress_thumb_overwrite_warning"):
+        try:
+            return bool(getattr(prefs, "suppress_thumb_overwrite_warning", False))
+        except Exception:
+            pass
+    _refresh_overlay_prefs_from_disk()
+    return bool(_OVERLAY_PREFS_MEMO.get("suppress_thumb_overwrite_warning", False))
+
+
+def set_suppress_thumb_overwrite_warning(context, val: bool) -> None:
+    """Sets and persists the 'Bypass Thumbnail Overwrite Warning (Do Not Ask Again)' preference."""
+    b_val = bool(val)
+    _OVERLAY_PREFS_MEMO["suppress_thumb_overwrite_warning"] = b_val
+    prefs = get_addon_preferences(context)
+    if prefs is not None and hasattr(prefs, "suppress_thumb_overwrite_warning"):
+        try:
+            prefs.suppress_thumb_overwrite_warning = b_val
+            return
+        except Exception:
+            pass
+    loaded = load_persisted_user_paths()
+    save_persisted_user_paths(
+        loaded.get("game_dir", ""),
+        loaded.get("studio_dir", ""),
+        loaded.get("staging_dir", ""),
+        loaded.get("author_name", ""),
+        loaded.get("enable_viewport_overlays_master", False),
+        False,
+        loaded.get("origin_ground_z_offset", 0.05),
+        loaded.get("variant_notch_color", [0.18, 0.80, 0.38]),
+        loaded.get("auto_render_thumbnails_on_compile", False),
+        b_val,
+    )
 
 
 def get_origin_ground_z_offset(context=None) -> float:
@@ -351,6 +404,7 @@ def _on_addon_pref_path_changed(self, context):
     v_col_attr = getattr(self, "variant_notch_color", (0.18, 0.80, 0.38))
     v_col = [float(v_col_attr[0]), float(v_col_attr[1]), float(v_col_attr[2])] if len(v_col_attr) >= 3 else [0.18, 0.80, 0.38]
     auto_thumb = bool(getattr(self, "auto_render_thumbnails_on_compile", False))
+    suppress_thumb_warn = bool(getattr(self, "suppress_thumb_overwrite_warning", False))
     save_persisted_user_paths(
         getattr(self, "game_dir", ""),
         getattr(self, "studio_dir", ""),
@@ -361,10 +415,12 @@ def _on_addon_pref_path_changed(self, context):
         orig_z,
         v_col,
         auto_thumb,
+        suppress_thumb_warn,
     )
     _OVERLAY_PREFS_MEMO["enable_viewport_overlays_master"] = bool(getattr(self, "enable_viewport_overlays_master", True))
     _OVERLAY_PREFS_MEMO["enable_pack_badges_master"] = False
     _OVERLAY_PREFS_MEMO["auto_render_thumbnails_on_compile"] = auto_thumb
+    _OVERLAY_PREFS_MEMO["suppress_thumb_overwrite_warning"] = suppress_thumb_warn
     _OVERLAY_PREFS_MEMO["origin_ground_z_offset"] = orig_z
     _OVERLAY_PREFS_MEMO["variant_notch_color"] = v_col
     try:
@@ -376,6 +432,17 @@ def _on_addon_pref_path_changed(self, context):
     try:
         if context and getattr(context, "preferences", None):
             context.preferences.is_dirty = True
+    except Exception:
+        pass
+    try:
+        invalidate_prop_state_caches()
+        def_tab = get_default_qd_tab_name(context)
+        for sc in getattr(bpy.data, "scenes", ()):
+            pr = getattr(sc, "reskate_prop", None)
+            if pr is not None and hasattr(pr, "custom_qd_tab"):
+                cur_t = str(getattr(pr, "custom_qd_tab", "") or "").strip()
+                if not cur_t or cur_t.lower() in ("customprops", "bkcustomprops"):
+                    pr.custom_qd_tab = def_tab
     except Exception:
         pass
 
@@ -512,6 +579,15 @@ class ReSkateAddonPreferences(bpy.types.AddonPreferences):
         description=(
             "When enabled, automatically launches EEVEE to render thumbnails for props that do not have a rendered or custom thumbnail at compile time. "
             "When disabled (default), uses the instant 'No Thumbnail' placeholder PNG (0 ms compile overhead)"
+        ),
+    )
+    suppress_thumb_overwrite_warning: BoolProperty(
+        name="Bypass Thumbnail Overwrite Warning (Do Not Ask Again)",
+        default=bool(_INITIAL_PATHS.get("suppress_thumb_overwrite_warning", False)),
+        update=_on_addon_pref_path_changed,
+        description=(
+            "When enabled, clicking 'Render Thumbnail' on a prop that already has a thumbnail immediately backs up "
+            "the previous thumbnail to .bak.png and renders without showing the confirmation popup dialog"
         ),
     )
     highlight_surfaces_enabled: BoolProperty(
@@ -652,6 +728,7 @@ class ReSkateAddonPreferences(bpy.types.AddonPreferences):
         vp_col = vp_box.column(align=True)
         vp_col.prop(self, "enable_viewport_overlays_master", text="Enable 3D Viewport Overlays (Source Level)")
         vp_col.prop(self, "auto_render_thumbnails_on_compile", text="Auto-Render Missing Thumbnails on Compile")
+        vp_col.prop(self, "suppress_thumb_overwrite_warning", text="Bypass Thumbnail Overwrite Warning (Do Not Ask Again)")
         vp_col.separator(factor=0.4)
         vp_col.prop(self, "thumb_live_preview_mode", text="Live Thumbnail Preview")
         vp_col.prop(self, "highlight_surfaces_enabled", text="Highlight Surfaces")
@@ -2163,8 +2240,10 @@ def _clean_slug_id(raw_str: str) -> str:
 
 def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
     """Returns the per-object prop authoring settings dictionary for `obj`, initializing defaults from `obj` if needed."""
+    default_qd_tab = get_default_qd_tab_name()
     if obj is None or getattr(obj, "type", None) != 'MESH':
         state = dict(_PER_PROP_DEFAULTS)
+        state["custom_qd_tab"] = default_qd_tab
         state["albedo_tint"] = list(_PER_PROP_DEFAULTS["albedo_tint"])
         state["thumb_bg_color"] = list(_PER_PROP_DEFAULTS["thumb_bg_color"])
         state["thumb_floor_color"] = list(_PER_PROP_DEFAULTS["thumb_floor_color"])
@@ -2183,6 +2262,7 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
         str(obj.get("reskate_key_slug", "")),
         str(obj.get("reskate_family_title", "")),
         bool(obj.get("reskate_custom_id_override", False)),
+        default_qd_tab,
     )
     hit = _OBJ_PROP_STATE_CACHE.get(obj_ptr)
     if hit is not None and hit[0] == cache_sig:
@@ -2194,6 +2274,7 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
         return res_copy
 
     state = dict(_PER_PROP_DEFAULTS)
+    state["custom_qd_tab"] = default_qd_tab
     state["albedo_tint"] = list(_PER_PROP_DEFAULTS["albedo_tint"])
     state["thumb_bg_color"] = list(_PER_PROP_DEFAULTS["thumb_bg_color"])
     state["thumb_floor_color"] = list(_PER_PROP_DEFAULTS["thumb_floor_color"])
@@ -2224,6 +2305,7 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
         state["prop_id_locked"] = bool(obj.get("reskate_custom_id_override", False))
         state["prop_key_slug"] = slug
         state["prop_family_title"] = str(obj.get("reskate_family_title") or "").strip()
+        state["custom_qd_tab"] = format_qd_tab_display_name(str(obj.get("reskate_custom_qd_tab") or default_qd_tab))
         state["thumb_variant_cutout_enabled"] = False
 
         # Check if a matching <ObjName>_COL or <ObjName>_PPHYS proxy exists
@@ -2244,11 +2326,13 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
         if state.get("placement_proxy_mode") == "BOUNDING_BOX" and not bool(obj.get("reskate_pphys_mode_explicit", False)):
             state["placement_proxy_mode"] = "MATCH_COLLISION"
         raw_tab = str(state.get("custom_qd_tab") or "").strip()
-        if not raw_tab or raw_tab.lower() in ("bkcustomprops", "customprops"):
+        if not raw_tab or (raw_tab.lower() in ("bkcustomprops", "customprops") and not bool(obj.get("reskate_user_set_qd_tab", False))):
             cat_prev = str(state.get("prop_category") or "").strip()
             if cat_prev and cat_prev.upper() not in ("CUSTOM_TAB", "CUSTOM PROPS", "BK_CUSTOM"):
                 raw_tab = cat_prev
-        state["custom_qd_tab"] = format_qd_tab_display_name(raw_tab or "CustomProps")
+            else:
+                raw_tab = default_qd_tab
+        state["custom_qd_tab"] = format_qd_tab_display_name(raw_tab or default_qd_tab)
         state["prop_category"] = "CUSTOM_TAB"
         if state["custom_qd_tab"] and state["custom_qd_tab"] != "CustomProps":
             try:
@@ -2807,8 +2891,15 @@ def _extra_update_prop_family_title(self, context):
     if obj is not None:
         try:
             obj["reskate_family_title"] = val
+            if "_reskate_last_preflight_json" in obj:
+                obj["_reskate_last_preflight_json"] = ""
         except Exception:
             pass
+    try:
+        from . import compiler_bridge
+        compiler_bridge.invalidate_ui_caches()
+    except Exception:
+        pass
     try:
         from . import ui_panels
         if hasattr(ui_panels, "invalidate_carousel_icon_for_object") and obj is not None:
@@ -2859,6 +2950,42 @@ def _get_custom_qd_tabs_json_path() -> Path:
     except Exception:
         from . import compiler_bridge
         return compiler_bridge.get_staging_dir() / "custom_qd_tabs.json"
+
+
+def get_default_qd_tab_name(context=None) -> str:
+    """
+    Returns the default Quick Drop Tab Name: the user's configured Author Name
+    (so props are automatically sorted by author in Quick Drop when left at default),
+    or 'CustomProps' if no Author Name has been set yet.
+    """
+    ctx = context if context is not None else bpy.context
+    author = ""
+    try:
+        if ctx and getattr(ctx, "preferences", None):
+            for k, addon_entry in ctx.preferences.addons.items():
+                if k.endswith(("reskate_prop_studio_addon", "sk8_prop_authoring_addon")) and getattr(addon_entry, "preferences", None) is not None:
+                    cand = str(getattr(addon_entry.preferences, "author_name", "") or "").strip()
+                    if cand:
+                        author = cand
+                        break
+    except Exception:
+        pass
+    if not author:
+        try:
+            scn = getattr(ctx, "scene", None) if ctx else None
+            prop = getattr(scn, "reskate_prop", None) if scn else None
+            if prop is not None:
+                author = str(getattr(prop, "author_name", "") or getattr(prop, "ts_author_name", "") or "").strip()
+        except Exception:
+            pass
+    if not author:
+        try:
+            author = str(load_persisted_user_paths().get("author_name", "") or "").strip()
+        except Exception:
+            author = ""
+    if author and author.lower() not in ("yourname", "reskateauthor", "customprops", "bkcustomprops"):
+        return format_qd_tab_display_name(author)
+    return "CustomProps"
 
 
 def format_qd_tab_display_name(raw_tab: str) -> str:
@@ -2949,11 +3076,84 @@ def remove_custom_qd_tab(raw_tab: str) -> list[str]:
     return list(tabs)
 
 
+def get_scene_qd_tabs_with_counts(context=None) -> list[dict]:
+    """
+    Returns an ordered list of Quick Drop Tab dicts (`{"tab_name": str, "count": int, "is_active": bool}`)
+    strictly from the prop meshes in the current .blend scene (no global history or disk clutter).
+    """
+    ctx = context if context is not None else bpy.context
+    scn = getattr(ctx, "scene", None) if ctx else None
+    prop = getattr(scn, "reskate_prop", None) if scn else None
+    def_tab = get_default_qd_tab_name(ctx)
+    def_key = _normalize_qd_tab_key(def_tab)
+    raw_cur = str(getattr(prop, "custom_qd_tab", "") or "").strip()
+    if not raw_cur or raw_cur.lower() in ("customprops", "bkcustomprops"):
+        raw_cur = def_tab
+    cur_val = format_qd_tab_display_name(raw_cur)
+    cur_key = _normalize_qd_tab_key(cur_val)
+
+    counts_by_key: dict[str, int] = {}
+    disp_by_key: dict[str, str] = {}
+    order_keys: list[str] = []
+
+    def _record(raw_val: str, inc: int = 1):
+        if not raw_val:
+            return
+        disp = format_qd_tab_display_name(raw_val)
+        k = _normalize_qd_tab_key(disp)
+        if not k:
+            return
+        if k not in disp_by_key:
+            disp_by_key[k] = disp
+            counts_by_key[k] = 0
+            order_keys.append(k)
+        counts_by_key[k] += int(inc)
+
+    try:
+        from . import compiler_bridge
+        active_mesh = resolve_active_prop_mesh(ctx)
+        for o in compiler_bridge.get_all_scene_prop_meshes(ctx):
+            if active_mesh is not None and o.name == active_mesh.name and prop is not None:
+                c_tab = str(getattr(prop, "custom_qd_tab", "") or "").strip()
+                if not c_tab or (c_tab.lower() in ("customprops", "bkcustomprops") and not bool(o.get("reskate_user_set_qd_tab", False))):
+                    c_tab = def_tab
+            else:
+                st_d = get_or_init_object_prop_state(o)
+                c_tab = str(
+                    (st_d.get("custom_qd_tab") if isinstance(st_d, dict) else "")
+                    or o.get("reskate_custom_qd_tab", "")
+                    or ""
+                ).strip()
+                if not c_tab and isinstance(st_d, dict):
+                    cat = str(st_d.get("prop_category") or o.get("reskate_category", "") or "").strip()
+                    if cat and cat.upper() not in ("CUSTOM_TAB", "CUSTOM PROPS"):
+                        c_tab = cat
+                if not c_tab or (c_tab.lower() in ("customprops", "bkcustomprops") and not bool(o.get("reskate_user_set_qd_tab", False))):
+                    c_tab = def_tab
+            _record(c_tab or def_tab, 1)
+    except Exception:
+        pass
+
+    if cur_val and cur_key not in disp_by_key:
+        _record(cur_val, 0)
+    if not order_keys:
+        _record(def_tab, 0)
+
+    return [
+        {
+            "tab_name": disp_by_key[k],
+            "count": counts_by_key.get(k, 0),
+            "is_active": (k == cur_key),
+            "is_saved": (k != def_key and k != "customprops"),
+        }
+        for k in order_keys
+    ]
+
+
 def get_pack_and_scene_qd_tabs(context=None) -> list[str]:
     """
-    Returns an ordered list of Quick Drop Tab Names used in the active Prop Pack,
-    in the current .blend scene, and in saved custom_qd_tabs.json.
-    Cached with a 2.0s TTL so UI redraws never scan all scene objects.
+    Returns an ordered list of Quick Drop Tab Names used in the current .blend scene only.
+    Cached with a 1.0s TTL so UI redraws stay 0 ms.
     """
     global _PACK_AND_SCENE_QD_TABS_CACHE
     import time as _time
@@ -2961,79 +3161,58 @@ def get_pack_and_scene_qd_tabs(context=None) -> list[str]:
     now = _time.monotonic()
     scn = getattr(ctx, "scene", None) if ctx else None
     n_scn_objs = len(scn.objects) if scn else 0
-
-    resolved_mod = ""
-    try:
-        from . import compiler_bridge
-        resolved_mod = compiler_bridge.get_resolved_target_mod_name(ctx)
-    except Exception:
-        resolved_mod = ""
+    prop = getattr(scn, "reskate_prop", None) if scn else None
+    def_tab = get_default_qd_tab_name(ctx)
+    cur_tab_sig = f"{def_tab}|{getattr(prop, 'custom_qd_tab', '') if prop else ''}"
 
     if (
         _PACK_AND_SCENE_QD_TABS_CACHE[3]
-        and _PACK_AND_SCENE_QD_TABS_CACHE[1] == resolved_mod
+        and _PACK_AND_SCENE_QD_TABS_CACHE[1] == cur_tab_sig
         and _PACK_AND_SCENE_QD_TABS_CACHE[2] == n_scn_objs
-        and (now - _PACK_AND_SCENE_QD_TABS_CACHE[0]) < 2.0
+        and (now - _PACK_AND_SCENE_QD_TABS_CACHE[0]) < 1.0
     ):
         return list(_PACK_AND_SCENE_QD_TABS_CACHE[3])
 
-    out: list[str] = []
-    seen_keys: set[str] = set()
-
-    def _add(raw_val: str):
-        if not raw_val:
-            return
-        disp = format_qd_tab_display_name(raw_val)
-        k = _normalize_qd_tab_key(disp)
-        if k and k not in seen_keys:
-            seen_keys.add(k)
-            out.append(disp)
-
-    try:
-        from . import compiler_bridge
-        mod_info = compiler_bridge.inspect_existing_mod_props(resolved_mod)
-        for p_det in mod_info.get("props_detail", []):
-            cat = str(p_det.get("category") or "").strip()
-            c_tab = str(p_det.get("custom_qd_tab") or "").strip()
-            if c_tab:
-                _add(c_tab)
-            elif cat and cat.upper() not in ("CUSTOM_TAB", "CUSTOM PROPS"):
-                _add(cat)
-        for o in compiler_bridge.get_all_scene_prop_meshes(ctx):
-            st_d = get_or_init_object_prop_state(o)
-            if isinstance(st_d, dict) and st_d.get("custom_qd_tab"):
-                _add(str(st_d["custom_qd_tab"]))
-    except Exception:
-        pass
-
-    for sv in load_custom_qd_tabs():
-        _add(sv)
-
+    out = [item["tab_name"] for item in get_scene_qd_tabs_with_counts(ctx)]
     if not out:
-        _add("CustomProps")
-    _PACK_AND_SCENE_QD_TABS_CACHE = (now, resolved_mod, n_scn_objs, list(out))
+        out = [def_tab]
+    _PACK_AND_SCENE_QD_TABS_CACHE = (now, cur_tab_sig, n_scn_objs, list(out))
     return out
 
 
 def _extra_update_custom_qd_tab(self, context):
+    global _PACK_AND_SCENE_QD_TABS_CACHE
+    _PACK_AND_SCENE_QD_TABS_CACHE = (0.0, "", -1, [])
     raw = str(getattr(self, "custom_qd_tab", "") or "").strip()
-    if raw:
+    def_tab = get_default_qd_tab_name(context)
+    obj = resolve_active_prop_mesh(context)
+    if not raw:
+        clean_disp = def_tab
+        user_explicit = False
+        try:
+            if getattr(self, "custom_qd_tab", "") != clean_disp:
+                self.custom_qd_tab = clean_disp
+        except Exception:
+            pass
+    else:
         clean_disp = format_qd_tab_display_name(raw)
+        user_explicit = (_normalize_qd_tab_key(clean_disp) != _normalize_qd_tab_key(def_tab))
         save_custom_qd_tab(clean_disp)
-        if getattr(self, "prop_category", "") != "CUSTOM_TAB":
-            try:
-                self.prop_category = "CUSTOM_TAB"
-            except Exception:
-                pass
-        obj = resolve_active_prop_mesh(context)
-        if obj is not None:
-            try:
-                st = get_or_init_object_prop_state(obj)
-                st["prop_category"] = "CUSTOM_TAB"
-                st["custom_qd_tab"] = clean_disp
-                save_object_prop_state(obj, st)
-            except Exception:
-                pass
+    if getattr(self, "prop_category", "") != "CUSTOM_TAB":
+        try:
+            self.prop_category = "CUSTOM_TAB"
+        except Exception:
+            pass
+    if obj is not None:
+        try:
+            obj["reskate_user_set_qd_tab"] = bool(user_explicit)
+            obj["reskate_custom_qd_tab"] = clean_disp
+            st = get_or_init_object_prop_state(obj)
+            st["prop_category"] = "CUSTOM_TAB"
+            st["custom_qd_tab"] = clean_disp
+            save_object_prop_state(obj, st)
+        except Exception:
+            pass
 
 
 def _update_custom_qd_tab(self, context):
@@ -4417,9 +4596,11 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
         update=_make_prop_updater("prop_category"),
         description="Quick Drop menu category/tab where this prop appears in-game (e.g. bkcustomprops, bkrails, bkledges, bklights, bkaudio)")
     custom_qd_tab: StringProperty(
-        name="Quick Drop Tab Name", default="CustomProps",
+        name="Quick Drop Tab",
+        default=format_qd_tab_display_name(_INITIAL_PATHS.get("author_name") or "CustomProps"),
         update=_update_custom_qd_tab,
-        description="Quick Drop category tab name (e.g. 'CustomProps', 'Rails', 'Ledges', 'Funboxes') — 'bk' is automatically added behind the scenes during compilation")
+        description="Quick Drop category tab name — defaults to your Author Name so your props are sorted by author in Quick Drop, or type any custom tab name ('bk' is added automatically during compilation)",
+    )
     prop_family_title: StringProperty(
         name="Object Family / Variant Group",
         default="",
@@ -5225,6 +5406,16 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
     mod_icon_path: StringProperty(
         name="Mod Folder Icon (icon.png)", subtype='FILE_PATH', default="",
         description="Optional PNG image copied as icon.png into the deployed mod folder (Mods/<PackName>/icon.png) and Thunderstore package (defaults to the first prop's thumbnail when left blank)")
+    use_pack_icon_as_first_prop: BoolProperty(
+        name="Use Pack Icon as #1 Quick Drop Tile (Sets Tab Icon)",
+        default=True,
+        update=_tag_redraw_view3d,
+        description=(
+            "When a custom Pack Icon (icon.png) is set, automatically generates a small 60x60cm square tile prop "
+            "with your Pack Icon as its texture and places it at #1 in the pack so Skate. uses your Pack Icon "
+            "as the Quick Drop Tab Icon (includes a grab-friendly 30cm tall Quick Drop placement/grab proxy)"
+        ),
+    )
     mod_readme_path: StringProperty(
         name="Custom README.md File", subtype='FILE_PATH', default="",
         description="Optional custom README.md file copied into the deployed mod folder and Thunderstore package (auto-generates a README with the object list when left blank)")

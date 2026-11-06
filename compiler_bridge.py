@@ -227,9 +227,9 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.32.3"
+ADDON_VERSION = "0.33.0"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.32.3"
+COMPILER_VERSION = "0.33.0"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -9185,12 +9185,15 @@ _VALID_THUMB_MEMO: dict[tuple[str, int, int, int], bool] = {}
 
 def _is_valid_rendered_thumbnail(p: Path | str | None, min_bytes: int = 1200) -> bool:
     """
-    Returns True only if `p` exists on disk, is larger than `min_bytes` (rejecting 859-byte / 4,028-byte
-    solid-slate `(40, 45, 55, 255)` placeholders), and has non-zero pixel variance.
+    Returns True only if `p` exists on disk, is not a static 'No Thumbnail' placeholder,
+    is larger than `min_bytes` (rejecting 859-byte / 4,028-byte solid-slate placeholders),
+    and has non-zero pixel variance.
     """
     if not p:
         return False
     p_obj = Path(p)
+    if "reskate_static_no_thumb_" in p_obj.name.lower():
+        return False
     try:
         st = p_obj.stat()
     except OSError:
@@ -9203,9 +9206,20 @@ def _is_valid_rendered_thumbnail(p: Path | str | None, min_bytes: int = 1200) ->
     if cached is not None:
         return cached
     try:
-        with Image.open(p_obj) as im:
-            arr = np.asarray(im.convert("RGBA"), dtype=np.float32)
-            valid = not (float(arr[:, :, :3].std()) < 0.5 and float(arr[:, :, 3].std()) < 0.5)
+        if Image is not None:
+            with Image.open(p_obj) as im:
+                arr = np.asarray(im.convert("RGBA"), dtype=np.float32)
+                valid = not (float(arr[:, :, :3].std()) < 0.5 and float(arr[:, :, 3].std()) < 0.5)
+        else:
+            img = bpy.data.images.load(str(p_obj), check_existing=False)
+            try:
+                w_px, h_px = int(img.size[0]), int(img.size[1])
+                px_arr = np.empty(w_px * h_px * 4, dtype=np.float32)
+                img.pixels.foreach_get(px_arr)
+                arr = px_arr.reshape((h_px, w_px, 4)) * 255.0
+                valid = not (float(arr[:, :, :3].std()) < 0.5 and float(arr[:, :, 3].std()) < 0.5)
+            finally:
+                bpy.data.images.remove(img)
         if len(_VALID_THUMB_MEMO) > 512:
             _VALID_THUMB_MEMO.clear()
         _VALID_THUMB_MEMO[memo_key] = valid
@@ -9345,6 +9359,173 @@ def ensure_static_no_thumbnail_icon(context=None, has_variant: bool = False, siz
     return out_path
 
 
+def _has_variant_notch_pixels(png_path: Path | str | None, context=None) -> bool:
+    """Returns True if `png_path` exists on disk and has the bottom-left Variant Family corner notch stamped on it."""
+    if not png_path:
+        return False
+    p = Path(png_path)
+    if not p.is_file() or "reskate_static_no_thumb_" in p.name.lower():
+        return False
+    try:
+        from . import properties as _props
+        notch_rgb = _props.get_variant_notch_color_rgb(context)
+    except Exception:
+        notch_rgb = (46, 204, 97)
+    r_u8 = int(max(0, min(255, notch_rgb[0])))
+    g_u8 = int(max(0, min(255, notch_rgb[1])))
+    b_u8 = int(max(0, min(255, notch_rgb[2])))
+    if Image is not None:
+        try:
+            with Image.open(p) as im:
+                rgba = im.convert("RGBA")
+                w_px, h_px = rgba.size
+                if w_px < 16 or h_px < 16:
+                    return False
+                sample_coords = [
+                    (0, h_px - 1),
+                    (1, h_px - 2),
+                    (2, h_px - 4),
+                ]
+                for sx, sy in sample_coords:
+                    pr, pg, pb, pa = rgba.getpixel((sx, sy))
+                    if pa < 240 or abs(int(pr) - r_u8) > 16 or abs(int(pg) - g_u8) > 16 or abs(int(pb) - b_u8) > 16:
+                        return False
+            return True
+        except Exception:
+            pass
+    try:
+        img = bpy.data.images.load(str(p), check_existing=False)
+        try:
+            w_px, h_px = int(img.size[0]), int(img.size[1])
+            if w_px < 16 or h_px < 16:
+                return False
+            px_arr = np.empty(w_px * h_px * 4, dtype=np.float32)
+            img.pixels.foreach_get(px_arr)
+            px_grid = px_arr.reshape((h_px, w_px, 4))
+            rf, gf, bf = r_u8 / 255.0, g_u8 / 255.0, b_u8 / 255.0
+            for ry, rx in ((0, 0), (1, 1), (3, 2)):
+                pr, pg, pb, pa = px_grid[ry, rx]
+                if pa < 0.90 or abs(float(pr) - rf) > 0.08 or abs(float(pg) - gf) > 0.08 or abs(float(pb) - bf) > 0.08:
+                    return False
+            return True
+        finally:
+            bpy.data.images.remove(img)
+    except Exception:
+        return False
+
+
+def is_prop_thumbnail_out_of_date(context, obj: bpy.types.Object | None) -> tuple[bool, str]:
+    """
+    Checks whether `obj`'s rendered thumbnail is missing or out of date (e.g. Variant Family corner notch
+    added/removed since last render, or prop geometry/materials/surface modified since last render).
+    Returns `(is_outdated: bool, reason: str)`.
+    """
+    if not obj or getattr(obj, "type", None) != 'MESH':
+        return False, ""
+
+    prop = getattr(context.scene, "reskate_prop", None) if (context and getattr(context, "scene", None)) else None
+    obj_st = get_or_init_object_prop_state(obj)
+    active_mesh = resolve_active_prop_mesh(context) if context else None
+    is_active_obj = bool(active_mesh is not None and obj.name == active_mesh.name)
+    fam_str = str(
+        (getattr(prop, "prop_family_title", "") if (prop and is_active_obj) else "")
+        or obj.get("reskate_family_title", "")
+        or obj_st.get("prop_family_title", "")
+        or ""
+    ).strip()
+    want_notch = bool(fam_str)
+
+    # Locate current thumbnail on disk
+    slug = get_prop_slug(context, obj)
+    staging_dir = get_staging_dir(context)
+    thumb_candidates = []
+    for k in ("reskate_custom_thumbnail_path", "reskate_rendered_thumb_256"):
+        v = str(obj.get(k, "") or "").strip()
+        if v:
+            thumb_candidates.append(Path(v))
+    thumb_candidates.append(staging_dir / f"{slug}_thumb_256.png")
+    if DEFAULT_STAGING_DIR != staging_dir:
+        thumb_candidates.append(DEFAULT_STAGING_DIR / f"{slug}_thumb_256.png")
+
+    valid_thumb_p: Path | None = None
+    for cand in thumb_candidates:
+        if _is_valid_rendered_thumbnail(cand, min_bytes=500):
+            valid_thumb_p = cand
+            break
+
+    if valid_thumb_p is None:
+        return True, "No thumbnail rendered yet"
+
+    # 1. Check Variant Family corner notch state (metadata + actual bottom-left pixels on disk)
+    if "reskate_thumb_rendered_notch" in obj:
+        if bool(obj.get("reskate_thumb_rendered_notch")) != want_notch:
+            if want_notch:
+                return True, f"Variant Family corner notch missing ('{fam_str}')"
+            return True, "Variant Family corner notch still present after removal"
+    if _has_variant_notch_pixels(valid_thumb_p, context) != want_notch:
+        if want_notch:
+            return True, f"Variant Family corner notch missing ('{fam_str}')"
+        return True, "Variant Family corner notch still present after removal"
+
+    # 2. Check if prop was modified since thumbnail was last rendered
+    if bool(obj.get("reskate_thumb_dirty", False)):
+        return True, "Prop modified since thumbnail was rendered"
+    rendered_fp = str(obj.get("reskate_thumb_rendered_fp", "") or "").strip()
+    if rendered_fp:
+        cur_fp = compute_prop_scene_fingerprint(context, obj)
+        if cur_fp and cur_fp != rendered_fp:
+            return True, "Prop modified since thumbnail was rendered"
+
+    return False, "Thumbnail up to date"
+
+
+def has_any_outdated_thumbnails_fast(context, obj: bpy.types.Object | None = None) -> tuple[bool, int, str]:
+    """
+    Zero-I/O in-memory check suitable for UI panel drawing to detect whether `obj` or any selected
+    pack prop has a missing or out-of-date thumbnail (e.g. Variant Family changed after rendering).
+    Returns `(has_outdated, count, first_reason)`.
+    """
+    targets = get_selected_prop_meshes(context) if context else []
+    if obj is not None and getattr(obj, "type", None) == 'MESH' and obj not in targets:
+        targets = [obj] + list(targets)
+    if not targets:
+        return False, 0, ""
+
+    prop = getattr(context.scene, "reskate_prop", None) if (context and getattr(context, "scene", None)) else None
+    active_mesh = resolve_active_prop_mesh(context) if context else None
+    count = 0
+    first_reason = ""
+    for o in targets:
+        if not o or getattr(o, "type", None) != 'MESH':
+            continue
+        is_act = bool(active_mesh is not None and o.name == active_mesh.name)
+        o_st = get_or_init_object_prop_state(o)
+        fam = str(
+            (getattr(prop, "prop_family_title", "") if (prop and is_act) else "")
+            or o.get("reskate_family_title", "")
+            or o_st.get("prop_family_title", "")
+            or ""
+        ).strip()
+        want_notch = bool(fam)
+        has_rendered = bool(o.get("reskate_thumb_rendered", False) or o.get("reskate_rendered_thumb_256", "") or o.get("reskate_custom_thumbnail_path", ""))
+        if not has_rendered:
+            count += 1
+            if not first_reason:
+                first_reason = f"'{o.name}' has no rendered thumbnail"
+            continue
+        if "reskate_thumb_rendered_notch" in o and bool(o.get("reskate_thumb_rendered_notch")) != want_notch:
+            count += 1
+            if not first_reason:
+                first_reason = f"'{o.name}' Variant Family corner notch out of date"
+            continue
+        if bool(o.get("reskate_thumb_dirty", False)):
+            count += 1
+            if not first_reason:
+                first_reason = f"'{o.name}' modified since thumbnail was rendered"
+            continue
+    return (count > 0), count, first_reason
+
+
 def ensure_thumbnails(
     context,
     obj: bpy.types.Object,
@@ -9356,8 +9537,9 @@ def ensure_thumbnails(
     """
     Ensures 256x256 and 768x768 thumbnails exist on disk for `obj` (`prop_slug`).
     Reuses existing rendered/custom thumbnails when `skip_existing_thumbnails` is enabled.
-    When a thumbnail is missing during compile, uses the shared static 'No Thumbnail' icon in 0 ms
-    unless `auto_render_thumbnails_on_compile` is enabled in Add-on Preferences.
+    When `skip_existing_thumbnails` is unchecked (`force_rerender=True`), re-renders via EEVEE
+    when available and ALWAYS falls back to existing valid thumbnails on disk (never overwriting
+    a valid thumbnail with the static 'No Thumbnail' placeholder).
     """
     if not prop_slug:
         prop_slug = get_prop_slug(context, obj)
@@ -9383,23 +9565,64 @@ def ensure_thumbnails(
     ).strip()
     notch_active = bool(fam_str)
 
-    def _finalize_cached_pair(p256: Path, p768: Path) -> tuple[Path, Path]:
-        if notch_active:
-            staging_dir.mkdir(parents=True, exist_ok=True)
-            if p256.resolve() != t256.resolve():
-                shutil.copy2(p256, t256)
-                p256 = t256
-            if p768.resolve() != t768.resolve():
-                shutil.copy2(p768, t768)
-                p768 = t768
-            apply_variant_corner_notch_to_png_in_place(p768)
-            apply_variant_corner_notch_to_png_in_place(p256)
-        return p256, p768
-
     t256 = staging_dir / f"{prop_slug}_thumb_256.png"
     t768 = staging_dir / f"{prop_slug}_thumb_768.png"
+    t256_clean = staging_dir / f"{prop_slug}_thumb_256.clean.png"
+    t768_clean = staging_dir / f"{prop_slug}_thumb_768.clean.png"
 
-    if skip_existing:
+    def _finalize_cached_pair(p256: Path, p768: Path) -> tuple[Path, Path]:
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        # Check if clean un-notched backups exist in staging_dir or parent/default staging dir
+        for cand_d in (staging_dir, staging_dir.parent if staging_dir.name == "Pack_Queue" else None, DEFAULT_STAGING_DIR):
+            if cand_d is None:
+                continue
+            c256_cl = cand_d / f"{prop_slug}_thumb_256.clean.png"
+            c768_cl = cand_d / f"{prop_slug}_thumb_768.clean.png"
+            if _is_valid_rendered_thumbnail(c256_cl, min_bytes=1200) and _is_valid_rendered_thumbnail(c768_cl, min_bytes=4500):
+                if c256_cl.resolve() != t256_clean.resolve():
+                    try:
+                        shutil.copy2(c256_cl, t256_clean)
+                        shutil.copy2(c768_cl, t768_clean)
+                    except Exception:
+                        pass
+                break
+
+        if p256.resolve() != t256.resolve():
+            shutil.copy2(p256, t256)
+            p256 = t256
+        if p768.resolve() != t768.resolve():
+            shutil.copy2(p768, t768)
+            p768 = t768
+
+        # If p256/p768 is currently un-notched and we don't have a .clean.png backup yet, save one now!
+        if not _is_valid_rendered_thumbnail(t768_clean, min_bytes=4500) and not _has_variant_notch_pixels(p768, context):
+            try:
+                shutil.copy2(p768, t768_clean)
+                shutil.copy2(p256, t256_clean)
+            except Exception:
+                pass
+
+        # Restore from clean un-notched backup before stamping/clearing so removing a Variant Family also removes the notch
+        if _is_valid_rendered_thumbnail(t256_clean, min_bytes=1200) and _is_valid_rendered_thumbnail(t768_clean, min_bytes=4500):
+            try:
+                shutil.copy2(t768_clean, p768)
+                shutil.copy2(t256_clean, p256)
+            except Exception:
+                pass
+
+        if notch_active:
+            apply_variant_corner_notch_to_png_in_place(p768)
+            apply_variant_corner_notch_to_png_in_place(p256)
+
+        if obj is not None:
+            try:
+                obj["reskate_thumb_rendered_notch"] = bool(notch_active)
+                obj["reskate_thumb_rendered_family"] = fam_str
+            except Exception:
+                pass
+        return p256, p768
+
+    def _find_existing_valid_thumbnails() -> tuple[Path, Path] | None:
         # 1. Per-object custom override first, then scene override if it isn't bound to a different object
         if obj:
             for cust_key in ("reskate_custom_thumbnail_path", "reskate_custom_thumb_png"):
@@ -9423,12 +9646,7 @@ def ensure_thumbnails(
                 r256_p = Path(r256_str)
                 r768_p = Path(r768_str)
                 if _is_valid_rendered_thumbnail(r256_p, min_bytes=1200) and _is_valid_rendered_thumbnail(r768_p, min_bytes=4500):
-                    staging_dir.mkdir(parents=True, exist_ok=True)
-                    if r256_p.resolve() != t256.resolve():
-                        shutil.copy2(r256_p, t256)
-                    if r768_p.resolve() != t768.resolve():
-                        shutil.copy2(r768_p, t768)
-                    return _finalize_cached_pair(t256, t768)
+                    return _finalize_cached_pair(r256_p, r768_p)
 
         # 3. Fast PIL Lanczos downsample if 768 exists but 256 is missing
         if _is_valid_rendered_thumbnail(t768, min_bytes=4500) and not _is_valid_rendered_thumbnail(t256, min_bytes=1200):
@@ -9449,12 +9667,13 @@ def ensure_thumbnails(
             c256 = cand_dir / f"{prop_slug}_thumb_256.png"
             c768 = cand_dir / f"{prop_slug}_thumb_768.png"
             if _is_valid_rendered_thumbnail(c256, min_bytes=1200) and _is_valid_rendered_thumbnail(c768, min_bytes=4500):
-                staging_dir.mkdir(parents=True, exist_ok=True)
-                if c256.resolve() != t256.resolve():
-                    shutil.copy2(c256, t256)
-                if c768.resolve() != t768.resolve():
-                    shutil.copy2(c768, t768)
-                return _finalize_cached_pair(t256, t768)
+                return _finalize_cached_pair(c256, c768)
+        return None
+
+    if skip_existing:
+        existing_pair = _find_existing_valid_thumbnails()
+        if existing_pair is not None:
+            return existing_pair
     else:
         # Even when re-rendering is forced, if the user explicitly picked an external custom image file (not a staged _thumb_256.png), keep their custom image!
         if obj and obj.get("reskate_custom_thumbnail_path"):
@@ -9462,24 +9681,21 @@ def ensure_thumbnails(
             if not ext_p.name.endswith(("_thumb_256.png", "_thumb_768.png")) and _is_valid_rendered_thumbnail(ext_p, min_bytes=500):
                 return _finalize_cached_pair(ext_p, ext_p)
 
-    # Only auto-launch EEVEE thumbnail rendering during compile if the user explicitly enabled
-    # `auto_render_thumbnails_on_compile` in Add-on Preferences!
+    # Render via EEVEE when:
+    # - `not skip_existing` (user explicitly unchecked 'Skip Re-Rendering Existing Thumbnails' or requested force_rerender), OR
+    # - `auto_render_thumbnails_on_compile` is enabled in Add-on Preferences for missing thumbnails.
     auto_render_enabled = bool(properties.is_auto_render_thumbnails_on_compile_enabled(context))
-    if auto_render_enabled and hasattr(bpy.ops.reskate, "render_thumbnails"):
+    should_render = (not skip_existing) or auto_render_enabled
+    if should_render and not bpy.app.background and hasattr(bpy.ops.reskate, "render_thumbnails"):
         prev_active = getattr(context.view_layer.objects, "active", None) if context and hasattr(context, "view_layer") else None
         try:
             if obj and context and hasattr(context, "view_layer"):
                 context.view_layer.objects.active = obj
-            bpy.ops.reskate.render_thumbnails()
+            bpy.ops.reskate.render_thumbnails('EXEC_DEFAULT')
             r256_after = Path(str(obj.get("reskate_rendered_thumb_256", ""))) if (obj and obj.get("reskate_rendered_thumb_256")) else (get_staging_dir(context) / f"{prop_slug}_thumb_256.png")
             r768_after = Path(str(obj.get("reskate_rendered_thumb_768", ""))) if (obj and obj.get("reskate_rendered_thumb_768")) else (get_staging_dir(context) / f"{prop_slug}_thumb_768.png")
             if _is_valid_rendered_thumbnail(r256_after, min_bytes=1200) and _is_valid_rendered_thumbnail(r768_after, min_bytes=4500):
-                staging_dir.mkdir(parents=True, exist_ok=True)
-                if r256_after.resolve() != t256.resolve():
-                    shutil.copy2(r256_after, t256)
-                if r768_after.resolve() != t768.resolve():
-                    shutil.copy2(r768_after, t768)
-                return t256, t768
+                return _finalize_cached_pair(r256_after, r768_after)
         except Exception:
             pass
         finally:
@@ -9489,7 +9705,12 @@ def ensure_thumbnails(
                 except Exception:
                     pass
 
-    # Shared static 'No Thumbnail' placeholder PNGs (0 ms compile time, never launching EEVEE)
+    # Always preserve any existing valid thumbnail on disk (updating its Variant Corner Notch) before falling back to 'No Thumbnail'
+    fallback_existing = _find_existing_valid_thumbnails()
+    if fallback_existing is not None:
+        return fallback_existing
+
+    # Shared static 'No Thumbnail' placeholder PNGs (0 ms compile time, only when no rendered thumbnail exists anywhere)
     static_256 = ensure_static_no_thumbnail_icon(context, has_variant=notch_active, size=256)
     static_768 = ensure_static_no_thumbnail_icon(context, has_variant=notch_active, size=768)
     return static_256, static_768
@@ -9899,6 +10120,76 @@ def inspect_existing_mod_props(target_mod_name: str, staging_dir: Path | None = 
     return res_empty
 
 
+def _get_obj_pack_sort_order(o: bpy.types.Object) -> int:
+    """Returns the user-defined pack sort order for `o` (or 999999 if unset)."""
+    if o is None:
+        return 999999
+    try:
+        if "reskate_pack_sort_order" in o:
+            return int(o["reskate_pack_sort_order"])
+        st = get_or_init_object_prop_state(o)
+        if "pack_sort_order" in st:
+            return int(st["pack_sort_order"])
+    except Exception:
+        pass
+    return 999999
+
+
+def _sort_prop_meshes_by_pack_order(objs: list[bpy.types.Object]) -> list[bpy.types.Object]:
+    """Sorts a list of prop mesh objects by `reskate_pack_sort_order` while preserving original relative order for ties."""
+    if len(objs) < 2:
+        return objs
+    return [o for _, o in sorted(enumerate(objs), key=lambda item: (_get_obj_pack_sort_order(item[1]), item[0]))]
+
+
+def resolve_prop_surface_summary(
+    obj: bpy.types.Object | None,
+    mat_surfaces: list[dict],
+    default_surf_id: str,
+    default_surf_code: int,
+) -> tuple[str, int, str]:
+    """
+    Resolves `(surf_id, surf_code, surface_label)` for a prop from its per-material-slot
+    `mat_surfaces` (populated from `mat.reskate_mat.surface_role_preset` / `extract_material_surfaces`)
+    so the prop chart and `reskate-objects.json` always show the real material surface(s)
+    instead of falling back to `"Concrete_Solid"` / `"concrete_smooth"`.
+    """
+    surf_id = str(default_surf_id or "Concrete_Solid").strip()
+    surf_code = int(default_surf_code or 96)
+    non_decal = [
+        ms for ms in (mat_surfaces or [])
+        if isinstance(ms, dict)
+        and not bool(ms.get("is_decal_overlay", False))
+        and str(ms.get("surface") or "").strip().lower() != "decal_overlay"
+    ]
+    active_slots = non_decal if non_decal else [ms for ms in (mat_surfaces or []) if isinstance(ms, dict)]
+
+    labels: list[str] = []
+    if active_slots:
+        ms0 = active_slots[0]
+        s0_name = str(ms0.get("surface") or "").strip()
+        s0_code = int(ms0.get("packed") or surf_code or 96)
+        if s0_name and s0_name.upper() != "DEFAULT":
+            # Promote the primary non-decal material slot surface if prop-level surface was left at default concrete
+            if surf_id.lower() in ("concrete_smooth", "concrete_solid", "default", "") or len(active_slots) == 1:
+                surf_id = s0_name
+                surf_code = s0_code
+        for ms in active_slots:
+            ms_surf = str(ms.get("surface") or "").strip()
+            ms_code = int(ms.get("packed") or surf_code or 96)
+            lbl = get_surface_label(ms_surf if (ms_surf and ms_surf.upper() != "DEFAULT") else ms_code)
+            if lbl and lbl not in labels:
+                labels.append(lbl)
+
+    if not labels:
+        fallback_lbl = get_surface_label(surf_id if surf_id else surf_code)
+        if fallback_lbl:
+            labels.append(fallback_lbl)
+
+    surface_label = " + ".join(labels) if labels else "Concrete (Smooth)"
+    return surf_id, surf_code, surface_label
+
+
 def get_selected_prop_meshes(context) -> list[bpy.types.Object]:
     """
     Returns all selected prop MESH objects in the 3D Viewport / Outliner,
@@ -9947,7 +10238,7 @@ def get_selected_prop_meshes(context) -> list[bpy.types.Object]:
         if resolved.name not in seen_names:
             seen_names.add(resolved.name)
             out.append(resolved)
-    return out
+    return _sort_prop_meshes_by_pack_order(out)
 
 
 get_selected_prop_mesh_objects = get_selected_prop_meshes
@@ -9998,6 +10289,7 @@ def get_all_scene_prop_meshes(context) -> list[bpy.types.Object]:
         if o.name not in seen_names:
             seen_names.add(o.name)
             out.append(o)
+    out = _sort_prop_meshes_by_pack_order(out)
     _ALL_SCENE_PROP_MESHES_CACHE = (now, scn_ptr, scn_cnt, [o.name for o in out])
     return out
 
@@ -10058,6 +10350,7 @@ def get_pack_prop_meshes_in_scene(context=None, target_mod_name: str = "") -> li
         ):
             matched.append(o)
 
+    matched = _sort_prop_meshes_by_pack_order(matched)
     if len(_PACK_PROP_MESHES_CACHE) > 32:
         _PACK_PROP_MESHES_CACHE.clear()
     _PACK_PROP_MESHES_CACHE[cache_key] = (now, [o.name for o in matched])
@@ -10751,6 +11044,10 @@ def run_preflight_checks(context, obj: bpy.types.Object | None) -> list[dict]:
         bool(obj.get("reskate_custom_origin", False)),
         bool(obj.get("reskate_col_thickened", False)),
         col_mode_pf,
+        str(obj.get("reskate_family_title", "") or obj_st_pf.get("prop_family_title", "") or ""),
+        str(obj.get("reskate_thumb_rendered_fp", "") or ""),
+        obj.get("reskate_thumb_rendered_notch", None),
+        bool(obj.get("reskate_thumb_dirty", False)),
     )
     if obj.mode != 'EDIT' and pf_cache_key in _PREFLIGHT_CHECKS_CACHE:
         return [dict(c) for c in _PREFLIGHT_CHECKS_CACHE[pf_cache_key]]
@@ -10875,7 +11172,39 @@ def run_preflight_checks(context, obj: bpy.types.Object | None) -> list[dict]:
                 "fix_action": None,
             })
 
-    # 7. Forbidden ebp_chr_* effect check
+    # 7. Thumbnail up-to-date & Variant Corner Notch check
+    thumb_outdated, thumb_reason = is_prop_thumbnail_out_of_date(context, obj)
+    other_outdated_cnt = 0
+    try:
+        for o_other in get_selected_prop_meshes(context):
+            if o_other is not None and o_other != obj and is_prop_thumbnail_out_of_date(context, o_other)[0]:
+                other_outdated_cnt += 1
+    except Exception:
+        other_outdated_cnt = 0
+
+    if thumb_outdated:
+        extra_sfx = f" (+{other_outdated_cnt} other prop(s) in pack)" if other_outdated_cnt > 0 else ""
+        checks.append({
+            "level": "WARN",
+            "label": f"Thumbnail out of date: {thumb_reason}{extra_sfx}",
+            "fix_action": "RERENDER_OUTDATED_THUMBS",
+            "fix_label": "Re-Render Out-of-Date Thumbnails",
+        })
+    elif other_outdated_cnt > 0:
+        checks.append({
+            "level": "WARN",
+            "label": f"{other_outdated_cnt} other prop thumbnail(s) out of date in pack",
+            "fix_action": "RERENDER_OUTDATED_THUMBS",
+            "fix_label": "Re-Render Out-of-Date Thumbnails",
+        })
+    else:
+        checks.append({
+            "level": "OK",
+            "label": "Thumbnail up to date",
+            "fix_action": None,
+        })
+
+    # 8. Forbidden ebp_chr_* effect check
     slug = get_prop_slug(context, obj)
     if "ebp_chr_" in slug.lower():
         checks.append({
@@ -11050,7 +11379,10 @@ def _build_single_prop_manifest_generator_impl(
     lock_stable_prop_key_on_object(obj, slug)
     prop_id = slug[len("own_customprops_"):] if slug.startswith("own_customprops_") else get_canonical_prop_id(context, obj)
     display_name = get_prop_display_name(obj, context)
-    custom_qd_tab = str(getattr(prop, "custom_qd_tab", obj_state.get("custom_qd_tab", "CustomProps")) or "CustomProps") if prop else str(obj_state.get("custom_qd_tab", "CustomProps") or "CustomProps")
+    default_qd_tab = properties.get_default_qd_tab_name(context) if hasattr(properties, "get_default_qd_tab_name") else (author_name if author_name != "ReSkateAuthor" else "CustomProps")
+    custom_qd_tab = str(getattr(prop, "custom_qd_tab", obj_state.get("custom_qd_tab", default_qd_tab)) or default_qd_tab) if prop else str(obj_state.get("custom_qd_tab", default_qd_tab) or default_qd_tab)
+    if custom_qd_tab.lower() in ("customprops", "bkcustomprops") and not bool(obj.get("reskate_user_set_qd_tab", False)):
+        custom_qd_tab = default_qd_tab
     category = "CUSTOM_TAB" if custom_qd_tab else str(obj_state.get("prop_category") or (prop.prop_category if prop else "Custom Props"))
     try:
         from . import properties as _props
@@ -11217,6 +11549,10 @@ def _build_single_prop_manifest_generator_impl(
         surface_code = int(material_surfaces[0]["packed"])
         surface_id = str(material_surfaces[0]["surface"])
 
+    surface_id, surface_code, surface_label = resolve_prop_surface_summary(
+        obj, material_surfaces, surface_id, int(surface_code)
+    )
+
     # Auto-promote Round Rail mode when surface is Metal (Round Rail) (2976 / 37227424) or all grind_paths are ROUND_RAIL / COPING
     has_round_rail_paths = bool(grind_paths) and all(
         str(gp.get("type", "")).upper() in ("ROUND_RAIL", "COPING") for gp in grind_paths
@@ -11231,6 +11567,9 @@ def _build_single_prop_manifest_generator_impl(
                 if int(ms.get("packed", 0)) == 352:
                     ms["packed"] = 2976
                     ms["surface"] = "metal_rail"
+            surface_id, surface_code, surface_label = resolve_prop_surface_summary(
+                obj, material_surfaces, surface_id, int(surface_code)
+            )
 
     try:
         obj["reskate_last_compiled_fp"] = compute_prop_scene_fingerprint(context, obj)
@@ -11238,6 +11577,10 @@ def _build_single_prop_manifest_generator_impl(
     except Exception:
         pass
 
+    has_custom_pack_icon = bool(mod_icon_path and Path(mod_icon_path).is_file())
+    use_pack_icon_as_first_prop = bool(
+        has_custom_pack_icon and (getattr(prop, "use_pack_icon_as_first_prop", True) if prop else True)
+    )
     if not mod_icon_path and t256_path and t256_path.exists():
         mod_icon_path = str(t256_path)
 
@@ -11251,6 +11594,8 @@ def _build_single_prop_manifest_generator_impl(
         "category": category,
         "custom_qd_tab": custom_qd_tab,
         "mod_icon_path": mod_icon_path,
+        "has_custom_pack_icon": has_custom_pack_icon,
+        "use_pack_icon_as_first_prop": use_pack_icon_as_first_prop,
         "mod_readme_path": mod_readme_path,
         "author_name": author_name,
         "pack_version": pack_version,
@@ -11277,6 +11622,7 @@ def _build_single_prop_manifest_generator_impl(
         "anti_lip_sink_m": float(anti_lip_sink_m),
         "surface_material_code": int(surface_code),
         "surface_id": surface_id,
+        "surface_label": surface_label,
         "material_surfaces": material_surfaces,
         "face_surface_groups": face_surface_groups,
         "grind_paths": grind_paths,
@@ -11428,6 +11774,7 @@ def _build_pack_manifest_generator_impl(
 
     queue = getattr(scene, "reskate_pack_queue", [])
     if selected_objs is not None:
+        selected_objs = _sort_prop_meshes_by_pack_order(list(selected_objs))
         # Build queue items dynamically for the selected mesh objects
         queue.clear()
         total_sel = len(selected_objs)
@@ -11730,27 +12077,22 @@ def _build_pack_manifest_generator_impl(
         # Thumbnails (verify existing paths are real rendered thumbnails and respect skip_existing_thumbnails!)
         yield _status(f"[{q_idx+1}/{total_q}] Generating thumbnails for '{item.name}'...", round(prop_base_pct + 0.85 * delta_pct, 2))
         item_skip_thumbs = bool(getattr(prop, "skip_existing_thumbnails", True)) if prop is not None else True
-        if (
-            item_skip_thumbs
-            and item.thumb_256_path
+        if obj:
+            t256_p, t768_p = ensure_thumbnails(context, obj, slug, batch_dir, force_rerender=(not item_skip_thumbs))
+            item.thumb_256_path = str(t256_p)
+            item.thumb_768_path = str(t768_p)
+        elif (
+            item.thumb_256_path
             and item.thumb_768_path
             and _is_valid_rendered_thumbnail(item.thumb_256_path, min_bytes=1200)
             and _is_valid_rendered_thumbnail(item.thumb_768_path, min_bytes=4500)
         ):
             t256_p = Path(item.thumb_256_path)
             t768_p = Path(item.thumb_768_path)
-            item_fam_check = str(
-                (obj.get("reskate_family_title", "") if obj else "")
-                or obj_state.get("prop_family_title", "")
-                or ""
-            ).strip()
+            item_fam_check = str(obj_state.get("prop_family_title", "") or "").strip()
             if item_fam_check:
                 apply_variant_corner_notch_to_png_in_place(t768_p)
                 apply_variant_corner_notch_to_png_in_place(t256_p)
-        elif obj:
-            t256_p, t768_p = ensure_thumbnails(context, obj, slug, batch_dir, force_rerender=(not item_skip_thumbs))
-            item.thumb_256_path = str(t256_p)
-            item.thumb_768_path = str(t768_p)
         else:
             t256_p = batch_dir / f"{slug}_thumb_256.png"
             t768_p = batch_dir / f"{slug}_thumb_768.png"
@@ -11777,6 +12119,9 @@ def _build_pack_manifest_generator_impl(
                 if int(ms.get("packed", 0)) == 352:
                     ms["packed"] = 2976
                     ms["surface"] = "metal_rail"
+        surf_id, surf_code, surf_label = resolve_prop_surface_summary(
+            obj, mat_surfaces, surf_id, int(surf_code)
+        )
         face_surf_groups = extract_face_surface_overrides(obj, scale_mult=item_scale_mult) if (obj and obj.type == 'MESH') else []
         exp_data = extract_prop_experimental_data(obj, scale_mult=item_scale_mult) if (obj and obj.type == 'MESH') else {}
         item_col_mode = str(item.collision_mode or obj_state.get("collision_mode") or "SAME_AS_MESH")
@@ -11788,7 +12133,10 @@ def _build_pack_manifest_generator_impl(
             exp_data["no_skater_collision"] = True
             exp_data["no_collision_placement_mode"] = item_no_col_placement
 
-        item_custom_qd_tab = str(obj_state.get("custom_qd_tab") or (getattr(prop, "custom_qd_tab", "CustomProps") if prop else "CustomProps") or "CustomProps")
+        default_item_qd_tab = properties.get_default_qd_tab_name(context) if hasattr(properties, "get_default_qd_tab_name") else (author_name if author_name != "ReSkateAuthor" else "CustomProps")
+        item_custom_qd_tab = str(obj_state.get("custom_qd_tab") or (getattr(prop, "custom_qd_tab", default_item_qd_tab) if prop else default_item_qd_tab) or default_item_qd_tab)
+        if item_custom_qd_tab.lower() in ("customprops", "bkcustomprops") and not bool(obj is not None and obj.get("reskate_user_set_qd_tab", False)):
+            item_custom_qd_tab = default_item_qd_tab
         item_category = "CUSTOM_TAB" if item_custom_qd_tab else str(obj_state.get("prop_category") or item.category or "Custom Props")
         try:
             from . import properties as _props
@@ -11835,6 +12183,7 @@ def _build_pack_manifest_generator_impl(
             "anti_lip_sink_m": float(item_anti_lip_sink_m),
             "surface_material_code": int(surf_code),
             "surface_id": surf_id,
+            "surface_label": surf_label,
             "material_surfaces": mat_surfaces,
             "face_surface_groups": face_surf_groups,
             "grind_paths": grind_paths,
@@ -11858,6 +12207,10 @@ def _build_pack_manifest_generator_impl(
         })
         yield _status(f"[{q_idx+1}/{total_q}] Ready: '{item.name}'", prop_end_pct)
 
+    has_custom_pack_icon = bool(mod_icon_path and Path(mod_icon_path).is_file())
+    use_pack_icon_as_first_prop = bool(
+        has_custom_pack_icon and (getattr(prop, "use_pack_icon_as_first_prop", True) if prop else True)
+    )
     if not mod_icon_path and props_list:
         first_thumb = props_list[0].get("thumb_256_path") or props_list[0].get("thumb_768_path")
         if first_thumb and Path(str(first_thumb)).exists():
@@ -11878,6 +12231,8 @@ def _build_pack_manifest_generator_impl(
         "pack_version": pack_version,
         "pack_description": pack_description,
         "mod_icon_path": mod_icon_path,
+        "has_custom_pack_icon": has_custom_pack_icon,
+        "use_pack_icon_as_first_prop": use_pack_icon_as_first_prop,
         "mod_readme_path": mod_readme_path,
         "coexist_namespace": f"{author_name}/{target_mod}",
         "use_coexist_ids": True,

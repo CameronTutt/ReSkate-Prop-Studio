@@ -540,6 +540,12 @@ class RESKATE_OT_run_preflight_check(bpy.types.Operator):
         compiler_bridge.invalidate_ui_caches()
         primary_name = (act_obj or targets[0]).name
         if total_errs > 0 or total_warns > 0:
+            prop_scn = getattr(context.scene, "reskate_prop", None) if getattr(context, "scene", None) else None
+            if prop_scn is not None and hasattr(prop_scn, "show_preflight_details"):
+                try:
+                    prop_scn.show_preflight_details = True
+                except Exception:
+                    pass
             self.report(
                 {'WARNING'},
                 f"ReSkate Pre-Flight ('{primary_name}'): {total_errs} error(s), {total_warns} warning(s).",
@@ -2645,6 +2651,11 @@ class RESKATE_OT_preflight_fix(bpy.types.Operator):
 
         elif act == "GENERATE_SIMPLIFIED_COL":
             res = bpy.ops.reskate.generate_collision_preview()
+            self._refresh_cached_preflight(context, obj)
+            return res
+
+        elif act == "RERENDER_OUTDATED_THUMBS":
+            res = bpy.ops.reskate.rerender_outdated_thumbnails()
             self._refresh_cached_preflight(context, obj)
             return res
 
@@ -6451,6 +6462,8 @@ class RESKATE_OT_group_selected_as_variants(bpy.types.Operator):
             st["custom_qd_tab"] = shared_tab
             st["thumb_variant_cutout_enabled"] = False
             save_object_prop_state(m_obj, st)
+            if "_reskate_last_preflight_json" in m_obj:
+                m_obj["_reskate_last_preflight_json"] = ""
             try:
                 from . import ui_panels as _uip
                 if hasattr(_uip, "invalidate_carousel_icon_for_object"):
@@ -6488,6 +6501,8 @@ class RESKATE_OT_clear_variant_family(bpy.types.Operator):
             st["prop_family_title"] = ""
             st["thumb_variant_cutout_enabled"] = False
             save_object_prop_state(m_obj, st)
+            if "_reskate_last_preflight_json" in m_obj:
+                m_obj["_reskate_last_preflight_json"] = ""
             try:
                 from . import ui_panels as _uip
                 if hasattr(_uip, "invalidate_carousel_icon_for_object"):
@@ -6511,8 +6526,17 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
     bl_description = "Renders the 256×256 Quick Drop wheel icon and 768×768 inspection card image (backs up existing thumbnails to .bak.png before overwriting)"
     bl_options = {'REGISTER'}
 
+    dont_ask_again: BoolProperty(
+        name="Do not ask again (Bypass in Preferences)",
+        default=False,
+        options={'SKIP_SAVE'},
+        description="Always overwrite existing thumbnails automatically (after backing up .bak.png) without showing this confirmation popup. Can be re-enabled anytime in Add-on Preferences",
+    )
+
     def invoke(self, context, event):
         if bpy.app.background or not getattr(context, "window_manager", None):
+            return self.execute(context)
+        if properties.is_suppress_thumb_overwrite_warning_enabled(context):
             return self.execute(context)
         obj = get_target_mesh_object(context) or context.active_object
         slug = get_prop_slug(context, obj) if obj else "own_customprops_prop"
@@ -6520,7 +6544,8 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
         path_256 = staging_dir / f"{slug}_thumb_256.png"
         if path_256.exists() and path_256.stat().st_size > 200:
             self._existing_thumb_name = path_256.name
-            return context.window_manager.invoke_props_dialog(self, width=380)
+            self.dont_ask_again = False
+            return context.window_manager.invoke_props_dialog(self, width=400)
         return self.execute(context)
 
     def draw(self, context):
@@ -6528,8 +6553,15 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
         box = layout.box()
         box.label(text=f"Thumbnail '{getattr(self, '_existing_thumb_name', '')}' already exists.", icon='INFO')
         box.label(text="Existing files will be backed up to .bak.png before rendering.")
+        box.separator(factor=0.4)
+        box.prop(self, "dont_ask_again", text="Do not ask again (can be re-enabled in Preferences)")
 
     def execute(self, context):
+        if getattr(self, "dont_ask_again", False):
+            try:
+                properties.set_suppress_thumb_overwrite_warning(context, True)
+            except Exception:
+                pass
         scene = context.scene
         prop = getattr(scene, "reskate_prop", None)
         obj = get_target_mesh_object(context) or context.active_object
@@ -6805,6 +6837,17 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
                 scene.render.filepath = str(path_256)
                 bpy.ops.render.render(write_still=True)
 
+            # Save clean un-notched backups (.clean.png) so Variant Family corner notches can be added/removed non-destructively
+            path_768_clean = staging_dir / f"{slug}_thumb_768.clean.png"
+            path_256_clean = staging_dir / f"{slug}_thumb_256.clean.png"
+            try:
+                if path_768.exists():
+                    shutil.copy2(path_768, path_768_clean)
+                if path_256.exists():
+                    shutil.copy2(path_256, path_256_clean)
+            except Exception:
+                pass
+
             if has_variant_notch:
                 compiler_bridge.apply_variant_corner_notch_to_png_in_place(path_768)
                 compiler_bridge.apply_variant_corner_notch_to_png_in_place(path_256)
@@ -6854,6 +6897,18 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
             obj["reskate_rendered_thumb_256"] = str(path_256)
             obj["reskate_rendered_thumb_768"] = str(path_768)
             obj["reskate_thumb_rendered"] = True
+            obj["reskate_thumb_rendered_family"] = fam_title
+            obj["reskate_thumb_rendered_notch"] = bool(has_variant_notch)
+            obj["reskate_thumb_dirty"] = False
+            try:
+                obj["reskate_thumb_rendered_fp"] = compiler_bridge.compute_prop_scene_fingerprint(context, obj)
+            except Exception:
+                pass
+            if "_reskate_last_preflight_json" in obj and obj["_reskate_last_preflight_json"]:
+                try:
+                    obj["_reskate_last_preflight_json"] = json.dumps(compiler_bridge.run_preflight_checks(context, obj))
+                except Exception:
+                    obj["_reskate_last_preflight_json"] = ""
         if prop:
             prop.custom_thumb_png = str(path_256)
             if obj:
@@ -6878,11 +6933,91 @@ class RESKATE_OT_render_thumbnails(bpy.types.Operator):
 
         try:
             from . import ui_panels
+            if obj is not None and hasattr(ui_panels, "invalidate_carousel_icon_for_object"):
+                ui_panels.invalidate_carousel_icon_for_object(obj)
             ui_panels.invalidate_panel_caches()
         except Exception:
             pass
 
+        compiler_bridge.invalidate_ui_caches()
         self.report({'INFO'}, f"ReSkate: Rendered thumbnails for '{obj.name if obj else slug}' ({path_256.name} & {path_768.name}).")
+        return {'FINISHED'}
+
+
+class RESKATE_OT_rerender_outdated_thumbnails(bpy.types.Operator):
+    """Re-renders any missing or out-of-date thumbnails (e.g. after Variant Family or prop changes) for the active prop and pack"""
+    bl_idname = "reskate.rerender_outdated_thumbnails"
+    bl_label = "Re-Render Out-of-Date Thumbnails"
+    bl_description = "Automatically re-renders thumbnails for any prop(s) that were modified or added/removed from a Variant Family since their thumbnail was last rendered"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        targets = compiler_bridge.get_selected_prop_meshes(context)
+        act_obj = get_target_mesh_object(context) or context.active_object
+        if act_obj and getattr(act_obj, "type", None) == 'MESH' and act_obj not in targets:
+            targets = [act_obj] + list(targets)
+        if not targets:
+            self.report({'WARNING'}, "ReSkate: Select a 3D mesh prop first.")
+            return {'CANCELLED'}
+
+        outdated_objs = [o for o in targets if compiler_bridge.is_prop_thumbnail_out_of_date(context, o)[0]]
+        if not outdated_objs:
+            outdated_objs = [act_obj if (act_obj and getattr(act_obj, "type", None) == 'MESH') else targets[0]]
+
+        prev_active = context.view_layer.objects.active if hasattr(context, "view_layer") else None
+        prev_sel = [o for o in getattr(context, "selected_objects", [])]
+        prop = getattr(context.scene, "reskate_prop", None) if getattr(context, "scene", None) else None
+
+        rendered_names: list[str] = []
+        try:
+            for o in outdated_objs:
+                if not o or o.name not in bpy.data.objects:
+                    continue
+                context.view_layer.objects.active = o
+                if prop is not None:
+                    load_prop_settings_from_object(prop, o)
+                # Fast path: if only the Variant Family corner notch is out of date and clean un-notched backups (.clean.png)
+                # exist on disk (or we are in headless background mode with an existing valid thumbnail), update via ensure_thumbnails
+                # when in background mode, or run a full EEVEE render in interactive mode!
+                if bpy.app.background:
+                    slug = get_prop_slug(context, o)
+                    st_dir = compiler_bridge.get_staging_dir(context)
+                    p256, p768 = compiler_bridge.ensure_thumbnails(context, o, slug, st_dir, force_rerender=False)
+                    if compiler_bridge._is_valid_rendered_thumbnail(p256, min_bytes=500):
+                        o["reskate_rendered_thumb_256"] = str(p256)
+                        o["reskate_rendered_thumb_768"] = str(p768)
+                        o["reskate_thumb_rendered"] = True
+                        o["reskate_thumb_dirty"] = False
+                        o["reskate_thumb_rendered_fp"] = compiler_bridge.compute_prop_scene_fingerprint(context, o)
+                    else:
+                        bpy.ops.reskate.render_thumbnails('EXEC_DEFAULT')
+                else:
+                    bpy.ops.reskate.render_thumbnails('EXEC_DEFAULT')
+                rendered_names.append(o.name)
+        finally:
+            if prev_active and prev_active.name in bpy.data.objects:
+                context.view_layer.objects.active = prev_active
+                if prop is not None:
+                    load_prop_settings_from_object(prop, prev_active)
+            for so in prev_sel:
+                if so and so.name in bpy.data.objects:
+                    try:
+                        so.select_set(True)
+                    except Exception:
+                        pass
+
+        for o in targets:
+            try:
+                o["_reskate_last_preflight_json"] = json.dumps(compiler_bridge.run_preflight_checks(context, o))
+            except Exception:
+                pass
+        try:
+            from . import ui_panels
+            ui_panels.invalidate_panel_caches()
+        except Exception:
+            pass
+        compiler_bridge.invalidate_ui_caches()
+        self.report({'INFO'}, f"ReSkate: Re-rendered {len(rendered_names)} out-of-date thumbnail(s): {', '.join(rendered_names[:4])}")
         return {'FINISHED'}
 
 
@@ -7669,45 +7804,48 @@ class RESKATE_OT_select_pack_or_scene_props(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class RESKATE_OT_frame_selected_props(bpy.types.Operator):
-    """Frames the 3D Viewport camera around the currently selected (or active) prop mesh(es)"""
-    bl_idname = "reskate.frame_selected_props"
-    bl_label = "Frame Selected"
-    bl_description = "Centers and zooms the 3D Viewport on the currently selected (or active) prop mesh(es)"
-    bl_options = {'REGISTER'}
-
-    def execute(self, context):
-        sel_meshes = compiler_bridge.get_selected_prop_meshes(context)
-        act = get_target_mesh_object(context) or getattr(context, "active_object", None)
-        if not sel_meshes and act is not None and getattr(act, "type", None) == 'MESH':
-            try:
-                act.select_set(True)
-                sel_meshes = [act]
-            except Exception:
-                pass
-        if not sel_meshes:
-            self.report({'WARNING'}, "ReSkate: Select a 3D mesh prop in the viewport first.")
-            return {'CANCELLED'}
-
-        framed = False
+def _frame_single_prop_preserving_selection(context, target_obj) -> bool:
+    """
+    Frames ONLY `target_obj` in the 3D Viewport while preserving any multi-prop
+    Carousel selection in `context.selected_objects`.
+    """
+    if target_obj is None:
+        return False
+    prev_sel = [o for o in (getattr(context, "selected_objects", None) or []) if o is not None]
+    framed = False
+    try:
+        target_obj.hide_viewport = False
         try:
-            wm = getattr(context, "window_manager", None)
-            if wm and getattr(wm, "windows", None):
-                for window in wm.windows:
-                    if not window.screen:
-                        continue
-                    for area in window.screen.areas:
-                        if area.type == 'VIEW_3D':
-                            region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-                            if region:
-                                with context.temp_override(window=window, area=area, region=region):
-                                    bpy.ops.view3d.view_selected()
-                                    framed = True
-                                break
-                    if framed:
-                        break
+            target_obj.hide_set(False)
         except Exception:
             pass
+        for o in prev_sel:
+            if o != target_obj:
+                try:
+                    o.select_set(False)
+                except Exception:
+                    pass
+        try:
+            target_obj.select_set(True)
+            context.view_layer.objects.active = target_obj
+        except Exception:
+            pass
+
+        wm = getattr(context, "window_manager", None)
+        if wm and getattr(wm, "windows", None):
+            for window in wm.windows:
+                if not window.screen:
+                    continue
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+                        if region:
+                            with context.temp_override(window=window, area=area, region=region):
+                                bpy.ops.view3d.view_selected()
+                                framed = True
+                            break
+                if framed:
+                    break
         if not framed:
             try:
                 if bpy.ops.view3d.view_selected.poll():
@@ -7715,7 +7853,44 @@ class RESKATE_OT_frame_selected_props(bpy.types.Operator):
                     framed = True
             except Exception:
                 pass
-        self.report({'INFO'}, f"ReSkate: Framed {len(sel_meshes)} selected prop(s) in viewport.")
+    except Exception:
+        pass
+    finally:
+        for o in prev_sel:
+            try:
+                o.select_set(True)
+            except Exception:
+                pass
+        try:
+            target_obj.select_set(True)
+            context.view_layer.objects.active = target_obj
+        except Exception:
+            pass
+    return framed
+
+
+class RESKATE_OT_frame_selected_props(bpy.types.Operator):
+    """Frames the 3D Viewport camera around the currently active prop in the Carousel (without framing the entire scene)"""
+    bl_idname = "reskate.frame_selected_props"
+    bl_label = "Frame Selected"
+    bl_description = "Centers and zooms the 3D Viewport on the prop currently active in the Carousel while keeping your multi-prop selection intact"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        target_obj = (
+            properties.resolve_active_prop_mesh(context)
+            or get_target_mesh_object(context)
+            or getattr(context, "active_object", None)
+        )
+        if target_obj is None or getattr(target_obj, "type", None) != 'MESH':
+            sel_meshes = compiler_bridge.get_selected_prop_meshes(context)
+            target_obj = sel_meshes[0] if sel_meshes else None
+        if target_obj is None or getattr(target_obj, "type", None) != 'MESH':
+            self.report({'WARNING'}, "ReSkate: Select a 3D mesh prop in the viewport first.")
+            return {'CANCELLED'}
+
+        _frame_single_prop_preserving_selection(context, target_obj)
+        self.report({'INFO'}, f"ReSkate: Framed '{target_obj.name}' in viewport.")
         return {'FINISHED'}
 
 
@@ -7876,26 +8051,8 @@ class RESKATE_OT_pack_prop_action(bpy.types.Operator):
             if not target_obj:
                 self.report({'WARNING'}, f"ReSkate: Prop '{self.display_name or self.prop_key}' is in the pack registry, but no matching mesh object is in the current .blend scene.")
                 return {'CANCELLED'}
-            target_obj.hide_viewport = False
-            try:
-                target_obj.hide_set(False)
-            except Exception:
-                pass
-            bpy.ops.object.select_all(action='DESELECT')
-            target_obj.select_set(True)
-            context.view_layer.objects.active = target_obj
+            _frame_single_prop_preserving_selection(context, target_obj)
             sync_active_object_props(context.scene)
-            try:
-                for window in context.window_manager.windows:
-                    for area in window.screen.areas:
-                        if area.type == 'VIEW_3D':
-                            region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-                            if region:
-                                with context.temp_override(window=window, area=area, region=region):
-                                    bpy.ops.view3d.view_selected()
-                                break
-            except Exception:
-                pass
             self.report({'INFO'}, f"ReSkate: Selected & framed '{target_obj.name}' in scene.")
             return {'FINISHED'}
 
@@ -7949,6 +8106,159 @@ class RESKATE_OT_pack_prop_action(bpy.types.Operator):
 
     def modal(self, context, event):
         return _handle_compile_modal(self, context, event)
+
+
+class RESKATE_OT_reorder_pack_prop(bpy.types.Operator):
+    """Reorders a prop inside the current pack (Move to #1, Move Up, Move Down) and immediately updates the Carousel order"""
+    bl_idname = "reskate.reorder_pack_prop"
+    bl_label = "Reorder Prop in Pack"
+    bl_description = "Changes this prop's order in the pack (#1 is used as the Quick Drop Tab Icon unless a custom Pack Icon is active) and updates the Carousel order"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    obj_name: StringProperty(
+        name="Object Name",
+        default="",
+        options={'SKIP_SAVE'},
+    )
+    prop_key: StringProperty(
+        name="Prop Key",
+        default="",
+        options={'SKIP_SAVE'},
+    )
+    direction: EnumProperty(
+        name="Direction",
+        items=[
+            ('UP', "Move Up", "Move this prop up one position in the pack order"),
+            ('DOWN', "Move Down", "Move this prop down one position in the pack order"),
+            ('TOP', "Move to #1 (First)", "Move this prop to the #1 position in the pack order"),
+        ],
+        default='UP',
+        options={'SKIP_SAVE'},
+    )
+
+    def execute(self, context):
+        target_mod = compiler_bridge.get_resolved_target_mod_name(context)
+        sel_meshes = list(compiler_bridge.get_selected_prop_meshes(context))
+        pack_objs = list(compiler_bridge.get_pack_prop_meshes_in_scene(context, target_mod))
+
+        ordered_objs: list[bpy.types.Object] = []
+        seen_names: set[str] = set()
+        for o in (sel_meshes if len(sel_meshes) >= 2 else pack_objs):
+            if o is not None and o.name not in seen_names:
+                seen_names.add(o.name)
+                ordered_objs.append(o)
+        for o in pack_objs:
+            if o is not None and o.name not in seen_names:
+                seen_names.add(o.name)
+                ordered_objs.append(o)
+        if len(ordered_objs) < 2:
+            for o in compiler_bridge.get_all_scene_prop_meshes(context):
+                if o is not None and o.name not in seen_names:
+                    seen_names.add(o.name)
+                    ordered_objs.append(o)
+
+        want_obj_nm = (self.obj_name or "").strip()
+        want_key = (self.prop_key or "").strip().lower()
+        dir_up = (self.direction or "UP").upper()
+
+        moved_label = want_obj_nm or self.prop_key or "Prop"
+        new_pos_1based = 1
+
+        target_idx = -1
+        for i, o in enumerate(ordered_objs):
+            if want_obj_nm and o.name == want_obj_nm:
+                target_idx = i
+                break
+            if want_key:
+                o_slug = compiler_bridge.get_prop_slug(context, o).lower()
+                o_id = compiler_bridge.get_canonical_prop_id(context, o).lower()
+                if o_slug == want_key or o_id == want_key or f"own_customprops_{o_id}" == want_key:
+                    target_idx = i
+                    break
+
+        if target_idx >= 0 and len(ordered_objs) >= 2:
+            target_obj = ordered_objs.pop(target_idx)
+            if dir_up == "TOP":
+                new_idx = 0
+            elif dir_up == "UP":
+                new_idx = max(0, target_idx - 1)
+            else:
+                new_idx = min(len(ordered_objs), target_idx + 1)
+            ordered_objs.insert(new_idx, target_obj)
+            moved_label = target_obj.name
+            new_pos_1based = new_idx + 1
+
+            for idx, o in enumerate(ordered_objs):
+                try:
+                    o["reskate_pack_sort_order"] = int(idx)
+                    st = get_or_init_object_prop_state(o)
+                    st["pack_sort_order"] = int(idx)
+                    save_object_prop_state(o, st)
+                except Exception:
+                    pass
+
+        # Also sync order in pack_registry.json on disk if present
+        try:
+            pack_store = compiler_bridge.get_pack_storage_dir(target_mod)
+            reg_file = pack_store / "pack_registry.json"
+            if reg_file.exists():
+                reg_data = json.loads(reg_file.read_text(encoding="utf-8"))
+                reg_props = [p for p in reg_data.get("props", []) if isinstance(p, dict)]
+                if len(reg_props) >= 2:
+                    if ordered_objs:
+                        scene_key_order: list[str] = []
+                        for o in ordered_objs:
+                            s_slug = compiler_bridge.get_prop_slug(context, o).lower()
+                            scene_key_order.append(s_slug)
+
+                        def _reg_sort_key(item_tup):
+                            orig_i, p_dict = item_tup
+                            pk_l = str(p_dict.get("prop_key") or p_dict.get("prop_id") or "").strip().lower()
+                            if pk_l and not pk_l.startswith("own_customprops_"):
+                                pk_full = f"own_customprops_{pk_l}"
+                            else:
+                                pk_full = pk_l
+                            for s_i, sk in enumerate(scene_key_order):
+                                if sk == pk_l or sk == pk_full:
+                                    return (0, s_i, orig_i)
+                            return (1, orig_i, orig_i)
+
+                        reg_props = [p for _, p in sorted(enumerate(reg_props), key=_reg_sort_key)]
+                    elif want_key:
+                        r_idx = -1
+                        for i, p_dict in enumerate(reg_props):
+                            pk_l = str(p_dict.get("prop_key") or p_dict.get("prop_id") or "").strip().lower()
+                            if pk_l == want_key or f"own_customprops_{pk_l}" == want_key:
+                                r_idx = i
+                                break
+                        if r_idx >= 0:
+                            r_item = reg_props.pop(r_idx)
+                            if dir_up == "TOP":
+                                nr_idx = 0
+                            elif dir_up == "UP":
+                                nr_idx = max(0, r_idx - 1)
+                            else:
+                                nr_idx = min(len(reg_props), r_idx + 1)
+                            reg_props.insert(nr_idx, r_item)
+                            moved_label = str(r_item.get("display_name") or r_item.get("prop_key") or moved_label)
+                            new_pos_1based = nr_idx + 1
+                    reg_data["props"] = reg_props
+                    reg_file.write_text(json.dumps(reg_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        compiler_bridge.invalidate_ui_caches()
+        try:
+            from . import ui_panels
+            ui_panels.invalidate_panel_caches()
+        except Exception:
+            pass
+        try:
+            properties._tag_redraw_view3d(None, context)
+        except Exception:
+            pass
+        self.report({'INFO'}, f"ReSkate: Moved '{moved_label}' to #{new_pos_1based} in pack & Carousel order.")
+        return {'FINISHED'}
 
 
 class RESKATE_OT_restore_pack_backup(bpy.types.Operator):
@@ -10241,6 +10551,11 @@ class RESKATE_OT_select_saved_qd_tab(bpy.types.Operator):
         if hasattr(properties, "save_custom_qd_tab"):
             properties.save_custom_qd_tab(disp_val)
         if active_obj and getattr(active_obj, "type", None) == 'MESH':
+            def_tab = properties.get_default_qd_tab_name(context) if hasattr(properties, "get_default_qd_tab_name") else "CustomProps"
+            active_obj["reskate_user_set_qd_tab"] = (
+                properties._normalize_qd_tab_key(disp_val) != properties._normalize_qd_tab_key(def_tab)
+            )
+            active_obj["reskate_custom_qd_tab"] = disp_val
             st = dict(get_or_init_object_prop_state(active_obj))
             st["prop_category"] = 'CUSTOM_TAB'
             st["custom_qd_tab"] = disp_val
@@ -10251,20 +10566,38 @@ class RESKATE_OT_select_saved_qd_tab(bpy.types.Operator):
 
 
 class RESKATE_OT_remove_saved_qd_tab(bpy.types.Operator):
-    """Removes a custom Quick Drop tab from the persistent saved tabs list"""
+    """Removes a custom Quick Drop tab from the scene and resets any scene props using it back to the Author default"""
     bl_idname = "reskate.remove_saved_qd_tab"
-    bl_label = "Remove Saved Quick Drop Tab"
-    bl_description = "Removes this Quick Drop tab from the saved shortcuts list"
+    bl_label = "Remove Quick Drop Tab from Scene"
+    bl_description = "Removes this Quick Drop tab from the scene (resetting any props using it back to your Author Name default)"
     bl_options = {'REGISTER', 'UNDO'}
 
     tab_id: StringProperty(name="Tab ID", default="")
 
     def execute(self, context):
         t_val = str(self.tab_id or "").strip()
-        if t_val and hasattr(properties, "remove_custom_qd_tab"):
-            properties.remove_custom_qd_tab(t_val)
+        if t_val:
+            def_tab = properties.get_default_qd_tab_name(context) if hasattr(properties, "get_default_qd_tab_name") else "CustomProps"
+            target_key = properties._normalize_qd_tab_key(t_val) if hasattr(properties, "_normalize_qd_tab_key") else t_val.lower()
+            if hasattr(properties, "remove_custom_qd_tab"):
+                properties.remove_custom_qd_tab(t_val)
+            try:
+                for o in compiler_bridge.get_all_scene_prop_meshes(context):
+                    st_d = get_or_init_object_prop_state(o)
+                    cur_t = str((st_d.get("custom_qd_tab") if isinstance(st_d, dict) else "") or o.get("reskate_custom_qd_tab", "") or "").strip()
+                    if cur_t and properties._normalize_qd_tab_key(cur_t) == target_key:
+                        o["reskate_user_set_qd_tab"] = False
+                        o["reskate_custom_qd_tab"] = def_tab
+                        if isinstance(st_d, dict):
+                            st_d["custom_qd_tab"] = def_tab
+                            save_object_prop_state(o, st_d)
+                prop = getattr(context.scene, "reskate_prop", None) if getattr(context, "scene", None) else None
+                if prop and properties._normalize_qd_tab_key(str(getattr(prop, "custom_qd_tab", "") or "")) == target_key:
+                    prop.custom_qd_tab = def_tab
+            except Exception:
+                pass
             compiler_bridge.invalidate_ui_caches()
-            self.report({'INFO'}, f"ReSkate: Removed saved Quick Drop tab '{t_val}'.")
+            self.report({'INFO'}, f"ReSkate: Removed Quick Drop tab '{t_val}' from scene (reset to '{def_tab}').")
         return {'FINISHED'}
 
 
@@ -11991,17 +12324,8 @@ class RESKATE_OT_carousel_step(bpy.types.Operator):
     def execute(self, context):
         sel_meshes = compiler_bridge.get_selected_prop_meshes(context)
         if len(sel_meshes) < 2:
-            # If only 1 (or 0) prop is selected, cycle through all valid prop meshes in the scene so ◀/▶ always works!
-            scene_meshes = [
-                o for o in context.scene.objects
-                if getattr(o, "type", None) == 'MESH'
-                and o.data
-                and len(o.data.polygons) > 0
-                and not is_collision_helper_object(o)
-                and not bool(o.get("reskate_is_scale_reference", False))
-                and not bool(o.get("reskate_is_ref_helper", False))
-                and not o.name.upper().startswith(("RESKATE_REF_", "RESKATE_SKATER_", "RESKATE_BOARD_", "RESKATE_GROUND_PLANE", "_RESKATE_"))
-            ]
+            # If only 1 (or 0) prop is selected, cycle through all valid prop meshes in the scene (sorted by pack order) so ◀/▶ always works!
+            scene_meshes = compiler_bridge.get_all_scene_prop_meshes(context)
             if len(scene_meshes) < 2:
                 return {'FINISHED'}
             sel_meshes = scene_meshes
@@ -12319,6 +12643,7 @@ CLASSES = (
     RESKATE_OT_group_selected_as_variants,
     RESKATE_OT_clear_variant_family,
     RESKATE_OT_render_thumbnails,
+    RESKATE_OT_rerender_outdated_thumbnails,
     RESKATE_OT_choose_thumbnail_image,
     RESKATE_OT_preview_thumbnail_popup,
     RESKATE_OT_use_prop_thumb_as_mod_icon,
@@ -12332,6 +12657,7 @@ CLASSES = (
     RESKATE_OT_switch_or_assign_prop_pack,
     RESKATE_OT_unassign_prop_pack_from_scene,
     RESKATE_OT_pack_prop_action,
+    RESKATE_OT_reorder_pack_prop,
     RESKATE_OT_restore_pack_backup,
     RESKATE_OT_bump_pack_version,
     RESKATE_OT_export_thunderstore_zip,
