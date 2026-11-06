@@ -8049,6 +8049,8 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                 "props": props_for_readme,
             })
 
+        readme_text = compiler_bridge.ensure_pack_readme_footer(readme_text)
+
         changelog_lines = [
             "# Changelog",
             "",

@@ -1149,7 +1149,7 @@ def compile_multishape_havok_via_cli(col_shapes: list, max_faces_per_hull: int =
     havok_cache_file = None
     active_cli = Path(os.environ.get("RESKATE_CLI_EXE") or CLI_EXE)
     active_game_dir = Path(os.environ.get("RESKATE_GAME_DIR") or GAME_DIR)
-    comp_ver = os.environ.get("RESKATE_COMPILER_VERSION", "0.32.0")
+    comp_ver = os.environ.get("RESKATE_COMPILER_VERSION", "0.32.1")
     if fast_mode:
         try:
             import pickle
@@ -2100,7 +2100,7 @@ def compile_multishape_havok_batch_via_cli(
     hull_shapes_list = list(hull_shapes_list)[:12]
     active_cli = Path(active_cli_path or os.environ.get("RESKATE_CLI_EXE") or CLI_EXE)
     active_game_dir = Path(active_game_path or os.environ.get("RESKATE_GAME_DIR") or GAME_DIR)
-    comp_ver = os.environ.get("RESKATE_COMPILER_VERSION", "0.32.0")
+    comp_ver = os.environ.get("RESKATE_COMPILER_VERSION", "0.32.1")
     fast_mode = _is_fast_pipeline_mode()
     cache_root = (_get_compiler_cache_root() / "havok_hulls_v1") if fast_mode else None
     if cache_root is not None:

@@ -44,7 +44,7 @@ import site
 import unicodedata
 import zlib
 
-COMPILER_VERSION = "0.32.0"
+COMPILER_VERSION = "0.32.1"
 os.environ["RESKATE_COMPILER_VERSION"] = COMPILER_VERSION
 PIPELINE_MODE = os.environ.get("RESKATE_PIPELINE_MODE", "FAST_OPTIMIZED").strip().upper()
 LOGGED_INPUT_READS: list[str] = []
@@ -6290,8 +6290,14 @@ def compile_blender_props_package(
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 readme_src_str = str(meta.get("mod_readme_path") or "").strip()
+                footer_md = "\n---\n*Created with [ReSkate Prop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*\n"
                 if readme_src_str and Path(readme_src_str).is_file():
-                    shutil.copy2(Path(readme_src_str), dest_dir / "README.md")
+                    raw_rm = Path(readme_src_str).read_text(encoding="utf-8", errors="replace").rstrip()
+                    if "github.com/camerontutt/reskate-prop-studio" not in raw_rm.lower():
+                        raw_rm = f"{raw_rm}\n{footer_md}"
+                    else:
+                        raw_rm = raw_rm + "\n"
+                    (dest_dir / "README.md").write_text(raw_rm, encoding="utf-8")
                     return
                 lines = [
                     f"# {mod_name}",
@@ -6320,6 +6326,9 @@ def compile_blender_props_package(
                     "",
                     f"1. Copy the `{mod_name}` folder into `<Skate Game Folder>/Mods/` or install via ReSkate Mod Manager.",
                     "2. Launch Skate. and open the Quick Drop Object Browser.",
+                    "",
+                    "---",
+                    "*Created with [ReSkate Prop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*",
                     "",
                 ])
                 (dest_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")

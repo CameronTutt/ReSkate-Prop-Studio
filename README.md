@@ -1,5 +1,5 @@
 
-# 🛹 ReSkate Prop Studio (`v0.32.0`)
+# 🛹 ReSkate Prop Studio (`v0.32.1`)
 
 <img width="2350" height="1597" alt="Group 172" src="https://github.com/user-attachments/assets/b3d0d0d6-31c3-4db3-9dcf-ac1847d5fe97" />
 

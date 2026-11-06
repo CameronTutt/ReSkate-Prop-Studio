@@ -227,9 +227,9 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.32.0"
+ADDON_VERSION = "0.32.1"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.32.0"
+COMPILER_VERSION = "0.32.1"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -10584,6 +10584,22 @@ def check_mesh_uv_bounds(obj: bpy.types.Object | None, tolerance: float = 0.02) 
     return res_uv
 
 
+PACK_README_ATTRIBUTION_FOOTER = (
+    "\n---\n"
+    f"*Created with [ReSkate Prop Studio]({GITHUB_REPO_URL})*\n"
+)
+
+
+def ensure_pack_readme_footer(readme_text: str) -> str:
+    """Appends the 'Created with ReSkate Prop Studio' GitHub attribution footer if not already present."""
+    base = str(readme_text or "").rstrip()
+    if "github.com/camerontutt/reskate-prop-studio" in base.lower():
+        return base + "\n"
+    if not base:
+        return PACK_README_ATTRIBUTION_FOOTER.lstrip("\n")
+    return f"{base}\n{PACK_README_ATTRIBUTION_FOOTER}"
+
+
 def generate_pack_readme_markdown(manifest_data: dict) -> str:
     """
     Auto-generates a Thunderstore & mod-folder `README.md` with pack metadata and the full object list
@@ -10634,7 +10650,7 @@ def generate_pack_readme_markdown(manifest_data: dict) -> str:
         "2. Enable the pack in ReSkate Manager / `mods.json` and launch Skate.",
         "",
     ])
-    return "\n".join(lines)
+    return ensure_pack_readme_footer("\n".join(lines))
 
 
 def run_preflight_checks(context, obj: bpy.types.Object | None) -> list[dict]:
