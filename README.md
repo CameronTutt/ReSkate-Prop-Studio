@@ -25,7 +25,9 @@ You do **not** need any command-line tools or external scripts—everything runs
 
 - **Blender 4.2 – 5.3+** (**Blender 5.2 / 5.3 LTS** recommended)
 - **ReSkate** installed in your *Skate.* game folder
-- **`reskate_prop_studio_addon.zip`** (from the Releases page or your ReSkate Studio folder)
+- **`reskate_prop_studio_addon.zip`** (from the Releases page)
+-  **ReSkate Studio** Which can be found in the ReSkate Discord server.
+-  Reskate Studio folder should be in your Skate parent folder (where the skate.exe / reskatelauncher.exe is located)
 
 </details>
 
