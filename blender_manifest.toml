@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "sk8_prop_authoring_addon"
-version = "0.33.1"
+version = "0.33.2"
 name = "ReSkate Prop Studio"
 tagline = "Open-Source Zero-Donor Skate. Prop Authoring & Compiler Suite"
 maintainer = "Crem"

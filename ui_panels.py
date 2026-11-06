@@ -2347,7 +2347,8 @@ def _draw_session_update_banner(layout):
 
         btn_row = upd_box.row(align=True)
         btn_row.scale_y = 1.25
-        op_url = btn_row.operator("wm.url_open", text=f"Download v{latest_tag} on GitHub", icon='URL')
+        btn_row.operator("reskate.auto_install_update", text=f"⚡ 1-Click Update to v{latest_tag}", icon='IMPORT')
+        op_url = btn_row.operator("wm.url_open", text="Release Notes", icon='URL')
         op_url.url = rel_url
     except Exception:
         pass

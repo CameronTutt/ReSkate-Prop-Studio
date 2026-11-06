@@ -227,9 +227,9 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.33.1"
+ADDON_VERSION = "0.33.2"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.33.1"
+COMPILER_VERSION = "0.33.2"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -238,6 +238,7 @@ GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop
 _SESSION_UPDATE_CHECK_STARTED: bool = False
 _SESSION_UPDATE_AVAILABLE_TAG: str = ""
 _SESSION_UPDATE_HTML_URL: str = ""
+_SESSION_UPDATE_ZIP_URL: str = ""
 _SESSION_UPDATE_DISMISSED: bool = False
 
 
@@ -260,8 +261,29 @@ def _tag_redraw_all_view3d_for_update_banner():
     return None
 
 
+def extract_release_zip_asset_url(payload: dict) -> str:
+    """Extracts the direct download URL for `reskate_prop_studio_addon.zip` from a GitHub Release JSON payload."""
+    assets = payload.get("assets") if isinstance(payload, dict) else None
+    if isinstance(assets, list):
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            nm = str(a.get("name") or "").strip().lower()
+            dl = str(a.get("browser_download_url") or "").strip()
+            if dl and nm == "reskate_prop_studio_addon.zip":
+                return dl
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            nm = str(a.get("name") or "").strip().lower()
+            dl = str(a.get("browser_download_url") or "").strip()
+            if dl and nm.endswith(".zip"):
+                return dl
+    return f"{GITHUB_REPO_URL}/releases/latest/download/reskate_prop_studio_addon.zip"
+
+
 def _background_session_update_worker() -> None:
-    global _SESSION_UPDATE_AVAILABLE_TAG, _SESSION_UPDATE_HTML_URL
+    global _SESSION_UPDATE_AVAILABLE_TAG, _SESSION_UPDATE_HTML_URL, _SESSION_UPDATE_ZIP_URL
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -272,14 +294,251 @@ def _background_session_update_worker() -> None:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
         tag_name = str(payload.get("tag_name") or "").strip().lstrip("vV")
         html_url = str(payload.get("html_url") or f"{GITHUB_REPO_URL}/releases/latest")
+        zip_url = extract_release_zip_asset_url(payload)
         if tag_name and parse_version_tuple(tag_name) > parse_version_tuple(ADDON_VERSION_STR):
             _SESSION_UPDATE_AVAILABLE_TAG = tag_name
             _SESSION_UPDATE_HTML_URL = html_url
+            _SESSION_UPDATE_ZIP_URL = zip_url
             try:
                 if hasattr(bpy.app, "timers"):
                     bpy.app.timers.register(_tag_redraw_all_view3d_for_update_banner, first_interval=0.05)
             except Exception:
                 pass
+    except Exception:
+        pass
+
+
+def _to_plain_python_val(v):
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    if hasattr(v, "to_dict"):
+        try:
+            return {str(k): _to_plain_python_val(val) for k, val in v.to_dict().items()}
+        except Exception:
+            pass
+    if hasattr(v, "items"):
+        try:
+            return {str(k): _to_plain_python_val(val) for k, val in v.items()}
+        except Exception:
+            pass
+    if hasattr(v, "__iter__"):
+        try:
+            return [_to_plain_python_val(x) for x in v]
+        except Exception:
+            pass
+    return str(v)
+
+
+def capture_full_scene_and_prefs_snapshot(context=None) -> dict:
+    """
+    Captures a complete, non-destructive in-memory snapshot of:
+      1. Active object's per-prop state flushed to `obj["reskate_prop_state"]`
+      2. Every object's `reskate_*` custom ID-properties across `bpy.data.objects`
+      3. Every scene's `scene.reskate_prop` properties across `bpy.data.scenes`
+      4. Persisted `user_paths.json` raw bytes and parsed dict
+      5. A sidecar recovery `.blend` copy (`copy=True`) in `<Staging>/Backups/Scene_Recovery/`
+    """
+    from . import properties as _props
+    ctx = context if context is not None else bpy.context
+    prev_sync = getattr(_props, "_IS_SYNCING_PROP", False)
+    _props._IS_SYNCING_PROP = True
+    object_snapshots: dict[str, dict] = {}
+    scene_snapshots: dict[str, dict] = {}
+    try:
+        # 1. Flush active object state to obj["reskate_prop_state"]
+        try:
+            scn_cur = getattr(ctx, "scene", None) if ctx else getattr(bpy.context, "scene", None)
+            prop_cur = getattr(scn_cur, "reskate_prop", None) if scn_cur else None
+            act_obj = _props.resolve_active_prop_mesh(ctx)
+            if prop_cur is not None and act_obj is not None:
+                st = _props.get_or_init_object_prop_state(act_obj)
+                for k_def in getattr(_props, "_PER_PROP_DEFAULTS", {}):
+                    if hasattr(prop_cur, k_def):
+                        val = getattr(prop_cur, k_def)
+                        if hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
+                            st[k_def] = list(val)
+                        else:
+                            st[k_def] = val
+                _props.save_object_prop_state(act_obj, st)
+        except Exception:
+            pass
+
+        # 2. Snapshot all object `reskate_*` ID-properties
+        try:
+            for obj in bpy.data.objects:
+                obj_custom = {}
+                for k in list(obj.keys()):
+                    if str(k).startswith("reskate_"):
+                        obj_custom[str(k)] = _to_plain_python_val(obj[k])
+                if obj_custom:
+                    object_snapshots[obj.name] = obj_custom
+        except Exception:
+            pass
+
+        # 3. Snapshot all `scene.reskate_prop` properties
+        try:
+            for scn in bpy.data.scenes:
+                prop = getattr(scn, "reskate_prop", None)
+                if prop is None:
+                    continue
+                scn_dict: dict[str, object] = {}
+                for p_def in prop.bl_rna.properties:
+                    pid = p_def.identifier
+                    if pid in ("rna_type", "name") or getattr(p_def, "is_readonly", False):
+                        continue
+                    ptype = p_def.type
+                    try:
+                        val = getattr(prop, pid)
+                        if ptype in ("STRING", "BOOLEAN", "INT", "FLOAT", "ENUM"):
+                            if getattr(p_def, "is_array", False):
+                                scn_dict[pid] = ("ARRAY", list(val))
+                            else:
+                                scn_dict[pid] = ("SCALAR", val)
+                        elif ptype == "POINTER":
+                            scn_dict[pid] = ("POINTER", getattr(val, "name", None) if val is not None else None)
+                    except Exception:
+                        pass
+                scene_snapshots[scn.name] = scn_dict
+        except Exception:
+            pass
+    finally:
+        _props._IS_SYNCING_PROP = prev_sync
+
+    # 4. Snapshot user_paths.json raw bytes and parsed dict
+    cfg_file = _props._user_paths_config_file()
+    user_paths_bytes = None
+    if cfg_file.is_file():
+        try:
+            user_paths_bytes = cfg_file.read_bytes()
+        except Exception:
+            user_paths_bytes = None
+    user_paths_dict = dict(_props.load_persisted_user_paths())
+
+    # 5. Save non-destructive `.blend` recovery copy (`copy=True` leaves user's current file path & dirty state untouched)
+    recovery_blend_path = ""
+    try:
+        staging_dir = get_staging_dir(ctx)
+        rec_dir = staging_dir / "Backups" / "Scene_Recovery"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        cur_fp = str(getattr(bpy.data, "filepath", "") or "").strip()
+        stem = Path(cur_fp).stem if cur_fp else "unsaved_scene"
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", stem).strip("_")[:48] or "scene"
+        ts_str = time.strftime("%Y%m%d_%H%M%S")
+        rec_file = rec_dir / f"{safe_stem}_pre_update_{ts_str}.blend"
+        bpy.ops.wm.save_as_mainfile(filepath=str(rec_file), copy=True)
+        if rec_file.is_file():
+            recovery_blend_path = str(rec_file)
+        # Keep only the 5 most recent recovery .blend files
+        old_recs = sorted(rec_dir.glob("*_pre_update_*.blend"), key=lambda p: p.stat().st_mtime)
+        while len(old_recs) > 5:
+            oldest = old_recs.pop(0)
+            try:
+                oldest.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {
+        "object_snapshots": object_snapshots,
+        "scene_snapshots": scene_snapshots,
+        "user_paths_bytes": user_paths_bytes,
+        "user_paths_dict": user_paths_dict,
+        "recovery_blend_path": recovery_blend_path,
+    }
+
+
+def restore_full_scene_and_prefs_snapshot(snapshot: dict) -> None:
+    """Restores all scene properties, object `reskate_*` state, and `user_paths.json` preferences after a live update reload."""
+    if not isinstance(snapshot, dict):
+        return
+    from . import properties as _props
+
+    prev_sync = getattr(_props, "_IS_SYNCING_PROP", False)
+    _props._IS_SYNCING_PROP = True
+    try:
+        # 1. Restore user_paths.json raw bytes & Preferences
+        cfg_file = _props._user_paths_config_file()
+        raw_b = snapshot.get("user_paths_bytes")
+        if raw_b is not None:
+            try:
+                cfg_file.parent.mkdir(parents=True, exist_ok=True)
+                cfg_file.write_bytes(raw_b)
+            except Exception:
+                pass
+        _props._PERSISTED_USER_PATHS_CACHE = (0.0, {})
+        up_dict = snapshot.get("user_paths_dict") or {}
+        prefs = _props.get_addon_preferences()
+        if prefs is not None and isinstance(up_dict, dict):
+            for k in (
+                "game_dir",
+                "studio_dir",
+                "staging_dir",
+                "author_name",
+                "enable_viewport_overlays_master",
+                "enable_pack_badges_master",
+                "auto_render_thumbnails_on_compile",
+                "suppress_thumb_overwrite_warning",
+                "origin_ground_z_offset",
+                "variant_notch_color",
+            ):
+                if k in up_dict and hasattr(prefs, k):
+                    try:
+                        setattr(prefs, k, up_dict[k])
+                    except Exception:
+                        pass
+
+        # 2. Restore object `reskate_*` custom properties
+        obj_snaps = snapshot.get("object_snapshots") or {}
+        for obj_name, custom_map in obj_snaps.items():
+            obj = bpy.data.objects.get(obj_name)
+            if obj is None or not isinstance(custom_map, dict):
+                continue
+            for k, v in custom_map.items():
+                try:
+                    obj[k] = v
+                except Exception:
+                    pass
+
+        # 3. Restore scene `reskate_prop` properties
+        scn_snaps = snapshot.get("scene_snapshots") or {}
+        for scn_name, scn_dict in scn_snaps.items():
+            scn = bpy.data.scenes.get(scn_name)
+            if scn is None or not isinstance(scn_dict, dict):
+                continue
+            prop = getattr(scn, "reskate_prop", None)
+            if prop is None:
+                continue
+            for pid, entry in scn_dict.items():
+                if not hasattr(prop, pid) or not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                kind, val = entry
+                try:
+                    if kind in ("SCALAR", "ARRAY"):
+                        setattr(prop, pid, val)
+                    elif kind == "POINTER":
+                        if val is None:
+                            setattr(prop, pid, None)
+                        else:
+                            p_def = prop.bl_rna.properties.get(pid)
+                            fixed_type = getattr(getattr(p_def, "fixed_type", None), "identifier", "")
+                            if fixed_type == "Object":
+                                target_ptr = bpy.data.objects.get(val)
+                                if target_ptr is not None:
+                                    setattr(prop, pid, target_ptr)
+                except Exception:
+                    pass
+            try:
+                act_obj = _props.resolve_active_prop_mesh()
+                if act_obj is not None:
+                    prop["_active_synced_obj_name"] = act_obj.name
+            except Exception:
+                pass
+    finally:
+        _props._IS_SYNCING_PROP = prev_sync
+
+    try:
+        invalidate_ui_caches()
     except Exception:
         pass
 

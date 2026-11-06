@@ -44,7 +44,7 @@ import site
 import unicodedata
 import zlib
 
-COMPILER_VERSION = "0.33.1"
+COMPILER_VERSION = "0.33.2"
 os.environ["RESKATE_COMPILER_VERSION"] = COMPILER_VERSION
 PIPELINE_MODE = os.environ.get("RESKATE_PIPELINE_MODE", "FAST_OPTIMIZED").strip().upper()
 LOGGED_INPUT_READS: list[str] = []

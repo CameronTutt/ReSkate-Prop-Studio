@@ -776,12 +776,16 @@ class ReSkateAddonPreferences(bpy.types.AddonPreferences):
         status_txt = str(getattr(self, "last_update_status", "") or getattr(self, "update_check_status", "") or "").strip()
         if status_txt:
             upd_box.label(text=status_txt, icon='INFO')
-        latest_url = str(getattr(self, "update_latest_url", "") or "").strip()
-        if latest_url:
+        latest_url = str(getattr(self, "update_latest_url", "") or getattr(compiler_bridge, "_SESSION_UPDATE_HTML_URL", "") or "").strip()
+        avail_tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "").strip()
+        if latest_url or avail_tag:
             dl_row = upd_box.row(align=True)
-            dl_row.scale_y = 1.2
-            op_dl = dl_row.operator("wm.url_open", text="Open Latest Release on GitHub", icon='IMPORT')
-            op_dl.url = latest_url
+            dl_row.scale_y = 1.25
+            btn_lbl = f"⚡ 1-Click Update to v{avail_tag}" if avail_tag else "⚡ 1-Click Install Latest Update"
+            dl_row.operator("reskate.auto_install_update", text=btn_lbl, icon='IMPORT')
+            if latest_url:
+                op_dl = dl_row.operator("wm.url_open", text="Release Notes on GitHub", icon='URL')
+                op_dl.url = latest_url
         cred_col = upd_box.column(align=True)
         cred_col.scale_y = 0.85
         cred_col.label(text="Maintained by Crem • Special shout-out to NOBLE for his insights into making props for the game.", icon='HEART')

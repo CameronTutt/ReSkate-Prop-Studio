@@ -12525,6 +12525,7 @@ class RESKATE_OT_check_for_updates(bpy.types.Operator):
                     latest_url = html_url
                     compiler_bridge._SESSION_UPDATE_AVAILABLE_TAG = tag_name
                     compiler_bridge._SESSION_UPDATE_HTML_URL = html_url
+                    compiler_bridge._SESSION_UPDATE_ZIP_URL = compiler_bridge.extract_release_zip_asset_url(payload)
                     compiler_bridge._SESSION_UPDATE_DISMISSED = False
                 else:
                     status_msg = f"✅ Up to date (v{current_ver} is the latest release on GitHub)"
@@ -12559,6 +12560,300 @@ class RESKATE_OT_dismiss_update_banner(bpy.types.Operator):
         if getattr(context, "screen", None):
             for area in context.screen.areas:
                 area.tag_redraw()
+        return {'FINISHED'}
+
+
+def _perform_live_addon_reload_and_restore(snapshot: dict, new_ver_str: str) -> None:
+    """
+    Cleanly unregisters the current add-on, reloads all submodules from disk in dependency order,
+    re-registers the add-on, and restores the full scene & preferences snapshot.
+    """
+    import importlib
+    pkg_name = __package__ or "sk8_prop_authoring_addon"
+    root_mod = sys.modules.get(pkg_name)
+    try:
+        if root_mod is not None and hasattr(root_mod, "unregister"):
+            root_mod.unregister()
+    except Exception:
+        pass
+
+    submod_names = (
+        "properties",
+        "scale_reference_meshes",
+        "compiler_bridge",
+        "operators",
+        "gpu_draw",
+        "tutorial_dialogs",
+        "ui_panels",
+    )
+    for sm in submod_names:
+        full_sm = f"{pkg_name}.{sm}"
+        mod_obj = sys.modules.get(full_sm)
+        if mod_obj is not None:
+            try:
+                importlib.reload(mod_obj)
+            except Exception:
+                pass
+
+    if root_mod is not None:
+        try:
+            importlib.reload(root_mod)
+        except Exception:
+            pass
+        try:
+            if hasattr(root_mod, "register"):
+                root_mod.register()
+        except Exception:
+            pass
+
+    cb_mod = sys.modules.get(f"{pkg_name}.compiler_bridge") or compiler_bridge
+    pr_mod = sys.modules.get(f"{pkg_name}.properties") or properties
+    try:
+        cb_mod.restore_full_scene_and_prefs_snapshot(snapshot)
+        cb_mod._SESSION_UPDATE_AVAILABLE_TAG = ""
+        cb_mod._SESSION_UPDATE_DISMISSED = True
+    except Exception:
+        pass
+
+    try:
+        prefs = pr_mod.get_addon_preferences()
+        if prefs is not None:
+            msg = f"✅ Updated & reloaded to v{new_ver_str} (all scene props & settings preserved!)"
+            prefs.last_update_status = msg
+            if hasattr(prefs, "update_check_status"):
+                prefs.update_check_status = msg
+            if hasattr(prefs, "update_latest_url"):
+                prefs.update_latest_url = ""
+    except Exception:
+        pass
+
+    try:
+        wm = getattr(bpy.context, "window_manager", None)
+        if wm:
+            for win in wm.windows:
+                if win.screen:
+                    for area in win.screen.areas:
+                        area.tag_redraw()
+    except Exception:
+        pass
+    return None
+
+
+class RESKATE_OT_auto_install_update(bpy.types.Operator):
+    """Downloads the latest ReSkate Prop Studio release from GitHub, verifies archive integrity, backs up your scene, and updates in 1 click without losing any work"""
+    bl_idname = "reskate.auto_install_update"
+    bl_label = "1-Click Update & Reload"
+    bl_description = "Safely downloads and installs the latest ReSkate Prop Studio update in-place while preserving all scene props, settings, and preferences"
+    bl_options = {'REGISTER'}
+
+    def invoke(self, context, event):
+        if bpy.app.background:
+            return self.execute(context)
+        return context.window_manager.invoke_props_dialog(self, width=440)
+
+    def draw(self, context):
+        layout = self.layout
+        tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "latest")
+        cur_v = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "") or "")
+        col = layout.column(align=True)
+        col.label(text=f"Install ReSkate Prop Studio v{tag} now? (Current: v{cur_v})", icon='IMPORT')
+        col.separator()
+        box = col.box()
+        b_col = box.column(align=True)
+        b_col.label(text="• Your scene props, materials, lights & pack settings are kept.", icon='CHECKMARK')
+        b_col.label(text="• Your Game Folder, Studio Folder & Author Name are kept.", icon='CHECKMARK')
+        b_col.label(text="• A safety backup of your .blend file is saved automatically.", icon='FILE_BACKUP')
+
+    def execute(self, context):
+        import py_compile
+        import tempfile
+        import urllib.request
+
+        prop = getattr(context.scene, "reskate_prop", None) if getattr(context, "scene", None) else None
+        if (prop and bool(getattr(prop, "is_compiling", False))) or (_ACTIVE_COMPILE_PROC is not None and _ACTIVE_COMPILE_PROC.poll() is None):
+            self.report({'WARNING'}, "ReSkate: Please wait for the current prop compilation to finish before updating.")
+            return {'CANCELLED'}
+
+        # 1. Capture full non-destructive snapshot + save sidecar .blend recovery backup
+        snapshot = compiler_bridge.capture_full_scene_and_prefs_snapshot(context)
+        rec_blend = snapshot.get("recovery_blend_path") or ""
+
+        test_zip_override = os.environ.get("RESKATE_TEST_UPDATE_ZIP_PATH", "").strip()
+        current_ver = compiler_bridge.ADDON_VERSION_STR
+        api_url = getattr(
+            compiler_bridge,
+            "GITHUB_RELEASES_API_URL",
+            "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest",
+        )
+        zip_url = str(getattr(compiler_bridge, "_SESSION_UPDATE_ZIP_URL", "") or "").strip()
+        target_tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "").strip()
+
+        with tempfile.TemporaryDirectory(prefix="reskate_auto_update_") as tmp_str:
+            tmp_dir = Path(tmp_str)
+            tmp_zip = tmp_dir / "reskate_prop_studio_addon.zip"
+
+            # 2. Download or copy update .zip into isolated temp dir
+            try:
+                if test_zip_override and Path(test_zip_override).is_file():
+                    shutil.copy2(test_zip_override, tmp_zip)
+                else:
+                    if not zip_url:
+                        req_meta = urllib.request.Request(
+                            api_url,
+                            headers={"User-Agent": f"ReSkatePropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
+                        )
+                        with urllib.request.urlopen(req_meta, timeout=10.0) as resp:
+                            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                        target_tag = str(payload.get("tag_name") or "").strip().lstrip("vV") or target_tag
+                        zip_url = compiler_bridge.extract_release_zip_asset_url(payload)
+
+                    req_dl = urllib.request.Request(
+                        zip_url,
+                        headers={"User-Agent": f"ReSkatePropStudio/{current_ver}"},
+                    )
+                    with urllib.request.urlopen(req_dl, timeout=20.0) as dl_resp:
+                        tmp_zip.write_bytes(dl_resp.read())
+            except Exception as dl_err:
+                self.report({'ERROR'}, f"ReSkate Update Failed: Could not download update archive ({dl_err}). Your installation was not modified.")
+                return {'CANCELLED'}
+
+            # 3. Verify .zip integrity, required modules, and Python syntax before touching any installed file
+            if not tmp_zip.is_file() or not zipfile.is_zipfile(tmp_zip):
+                self.report({'ERROR'}, "ReSkate Update Failed: Downloaded file is not a valid .zip archive. Your installation was not modified.")
+                return {'CANCELLED'}
+
+            extract_root = tmp_dir / "extracted"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            try:
+                with zipfile.ZipFile(tmp_zip, "r") as zf:
+                    bad_member = zf.testzip()
+                    if bad_member is not None:
+                        self.report({'ERROR'}, f"ReSkate Update Failed: Corrupted file '{bad_member}' in archive.")
+                        return {'CANCELLED'}
+                    zf.extractall(extract_root)
+            except Exception as z_err:
+                self.report({'ERROR'}, f"ReSkate Update Failed: Could not extract archive ({z_err}).")
+                return {'CANCELLED'}
+
+            extracted_addon_dir = None
+            if (extract_root / "sk8_prop_authoring_addon" / "__init__.py").is_file():
+                extracted_addon_dir = extract_root / "sk8_prop_authoring_addon"
+            elif (extract_root / "__init__.py").is_file():
+                extracted_addon_dir = extract_root
+            else:
+                for cand_init in extract_root.rglob("__init__.py"):
+                    if (cand_init.parent / "compiler_bridge.py").is_file():
+                        extracted_addon_dir = cand_init.parent
+                        break
+
+            required_py = ("__init__.py", "compiler_bridge.py", "operators.py", "properties.py", "ui_panels.py")
+            if extracted_addon_dir is None or not all((extracted_addon_dir / fn).is_file() for fn in required_py):
+                self.report({'ERROR'}, "ReSkate Update Failed: Archive is missing required add-on modules. Your installation was not modified.")
+                return {'CANCELLED'}
+
+            try:
+                for py_f in extracted_addon_dir.glob("*.py"):
+                    raw_b = py_f.read_bytes()
+                    if b"\x00" in raw_b:
+                        raise ValueError(f"Null bytes found in {py_f.name}")
+                    py_compile.compile(str(py_f), doraise=True)
+            except Exception as syn_err:
+                self.report({'ERROR'}, f"ReSkate Update Failed: Verification check failed ({syn_err}). Your installation was not modified.")
+                return {'CANCELLED'}
+
+            new_ver_str = target_tag or current_ver
+            try:
+                init_txt = (extracted_addon_dir / "__init__.py").read_text(encoding="utf-8", errors="replace")
+                m_ver = re.search(r"ADDON_VERSION\s*=\s*[\'\"]([^\'\"]+)[\'\"]", init_txt)
+                if m_ver:
+                    new_ver_str = m_ver.group(1).strip()
+            except Exception:
+                pass
+
+            # 4. Discover all installed copies of the add-on on this machine so no stale copy shadows the update
+            active_addon_dir = Path(__file__).resolve().parent
+            cand_dirs: list[Path] = [active_addon_dir]
+            try:
+                user_scripts = Path(bpy.utils.user_resource('SCRIPTS'))
+                if user_scripts:
+                    cand_dirs.append(user_scripts / "addons" / "sk8_prop_authoring_addon")
+            except Exception:
+                pass
+            try:
+                sys_scripts = Path(bpy.utils.system_resource('SCRIPTS'))
+                if sys_scripts:
+                    cand_dirs.append(sys_scripts / "addons_core" / "sk8_prop_authoring_addon")
+                    cand_dirs.append(sys_scripts / "addons" / "sk8_prop_authoring_addon")
+            except Exception:
+                pass
+            studio_p = compiler_bridge.get_studio_dir(context)
+            if studio_p and studio_p.is_dir():
+                cand_dirs.append(studio_p / "Native" / "Blender" / "sk8_prop_authoring_addon")
+                cand_dirs.append(studio_p / "Native" / "Blender" / "reskate_prop_studio_addon")
+
+            target_addon_dirs: list[Path] = []
+            seen_resolved: set[str] = set()
+            for cd in cand_dirs:
+                try:
+                    if cd.is_dir() and (cd / "__init__.py").is_file():
+                        r_key = str(cd.resolve()).lower()
+                        if r_key not in seen_resolved:
+                            seen_resolved.add(r_key)
+                            target_addon_dirs.append(cd)
+                except Exception:
+                    pass
+
+            # 5. Back up each target directory for atomic rollback, then copy new files in
+            rollback_root = tmp_dir / "rollback"
+            rollback_map: list[tuple[Path, Path]] = []
+            try:
+                for idx, t_dir in enumerate(target_addon_dirs):
+                    rb_dir = rollback_root / f"dir_{idx}"
+                    shutil.copytree(t_dir, rb_dir, dirs_exist_ok=True)
+                    rollback_map.append((t_dir, rb_dir))
+
+                for t_dir in target_addon_dirs:
+                    for item in extracted_addon_dir.iterdir():
+                        if item.name == "__pycache__":
+                            continue
+                        dest_item = t_dir / item.name
+                        if item.is_dir():
+                            shutil.copytree(item, dest_item, dirs_exist_ok=True)
+                        elif item.is_file():
+                            dest_item.write_bytes(item.read_bytes())
+                    pycache_dir = t_dir / "__pycache__"
+                    if pycache_dir.is_dir():
+                        shutil.rmtree(pycache_dir, ignore_errors=True)
+
+                # Also sync bundled_compiler/compile_blender_prop.py into <ReSkate Studio>/compile_blender_prop.py if present
+                bundled_comp = extracted_addon_dir / "bundled_compiler" / "compile_blender_prop.py"
+                if bundled_comp.is_file() and studio_p and (studio_p / "compile_blender_prop.py").is_file():
+                    try:
+                        shutil.copy2(studio_p / "compile_blender_prop.py", studio_p / "compile_blender_prop.py.bak")
+                        shutil.copy2(bundled_comp, studio_p / "compile_blender_prop.py")
+                    except Exception:
+                        pass
+            except Exception as swap_err:
+                for orig_dir, rb_dir in rollback_map:
+                    try:
+                        if rb_dir.is_dir():
+                            shutil.copytree(rb_dir, orig_dir, dirs_exist_ok=True)
+                    except Exception:
+                        pass
+                self.report({'ERROR'}, f"ReSkate Update Failed during file swap ({swap_err}). Rolled back cleanly.")
+                return {'CANCELLED'}
+
+        # 6. Report success while Operator RNA is active, then schedule deferred live reload outside operator stack
+        rec_note = f" (Scene backup saved to {Path(rec_blend).name})" if rec_blend else ""
+        self.report({'INFO'}, f"ReSkate: Updated to v{new_ver_str} across {len(target_addon_dirs)} location(s)!{rec_note}")
+
+        def _deferred_reload():
+            _perform_live_addon_reload_and_restore(snapshot, new_ver_str)
+            return None
+
+        compiler_bridge._PENDING_LIVE_RELOAD_FN = _deferred_reload
+        if hasattr(bpy.app, "timers") and not bpy.app.background:
+            bpy.app.timers.register(_deferred_reload, first_interval=0.05)
         return {'FINISHED'}
 
 
@@ -12720,6 +13015,7 @@ CLASSES = (
     RESKATE_OT_copy_compiler_log,
     RESKATE_OT_check_for_updates,
     RESKATE_OT_dismiss_update_banner,
+    RESKATE_OT_auto_install_update,
     RESKATE_OT_queue_add_active,
     RESKATE_OT_queue_sync_item,
     RESKATE_OT_queue_sync_all,
