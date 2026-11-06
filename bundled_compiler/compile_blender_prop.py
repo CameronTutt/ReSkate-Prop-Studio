@@ -6186,12 +6186,19 @@ def compile_blender_props_package(
             shutil.rmtree(backup_mod_dir, ignore_errors=True)
 
         built_ts = datetime.now(timezone.utc).isoformat()
+        raw_pack_part = mod_name
+        if author_name_str and raw_pack_part.lower().startswith(f"{author_name_str.lower()}-"):
+            raw_pack_part = raw_pack_part[len(author_name_str) + 1 :]
+        elif author_name_str and raw_pack_part.lower().startswith(f"{author_name_str.lower()}_"):
+            raw_pack_part = raw_pack_part[len(author_name_str) + 1 :]
+        ts_safe_name = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_pack_part).strip("_")[:128] or "Custom_Props"
+        ts_safe_author = re.sub(r"[^a-zA-Z0-9_]+", "_", author_name_str or "Author").strip("_") or "Author"
         manifest_data = {
-            "name": mod_name,
-            "author": author_name_str,
+            "name": ts_safe_name,
+            "author": ts_safe_author,
             "version_number": pack_version,
             "website_url": "",
-            "description": pack_desc,
+            "description": (pack_desc or "Custom skateable props built with ReSkate Prop Studio")[:250],
             "dependencies": [],
         }
         build_data = {

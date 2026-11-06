@@ -7983,41 +7983,61 @@ class RESKATE_OT_bump_pack_version(bpy.types.Operator):
 
 
 class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
-    """Packages the compiled .fbmod, manifest.json, README.md, CHANGELOG.md, and 256×256 icon.png into a Thunderstore-ready .zip"""
+    """Packages the compiled mod folder contents (Win32/, layout.toc, initfs_win32, reskate-objects.json) along with root manifest.json, README.md, CHANGELOG.md, and 256×256 icon.png into a Thunderstore-ready .zip"""
     bl_idname = "reskate.export_thunderstore_zip"
     bl_label = "Export Release .zip (Thunderstore)"
-    bl_description = "Packages the compiled .fbmod, manifest.json, README.md, CHANGELOG.md, and 256×256 icon.png into a clean release .zip in the Staging folder"
+    bl_description = "Packages the compiled mod folder contents and Thunderstore metadata (manifest.json, README.md, CHANGELOG.md, 256×256 icon.png) at the root of a Thunderstore-ready .zip"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
         prop = getattr(context.scene, "reskate_prop", None)
         target_mod = compiler_bridge.get_resolved_target_mod_name(context)
-        author = compiler_bridge.get_author_name(context) or "Author"
+        author_raw = compiler_bridge.get_author_name(context) or "Author"
+        author = re.sub(r"[^a-zA-Z0-9_]+", "_", author_raw).strip("_") or "Author"
         version = (getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0").strip() or "0.1.0"
         desc = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
 
         staging_dir = compiler_bridge.get_staging_dir(context)
-        fbmod_p = staging_dir / f"{target_mod}.fbmod"
-        if not fbmod_p.exists():
-            self.report({'WARNING'}, f"ReSkate: '{fbmod_p.name}' not found in Staging. Compile the pack first.")
+        game_dir = compiler_bridge.get_game_dir(context)
+        mods_dir = (game_dir / "Mods") if game_dir else None
+
+        # Locate compiled mod directory in Mods/<target_mod> or Staging/<target_mod>
+        compiled_mod_dir = None
+        if mods_dir and (mods_dir / target_mod).is_dir() and ((mods_dir / target_mod) / "Win32").is_dir():
+            compiled_mod_dir = mods_dir / target_mod
+        elif (staging_dir / target_mod).is_dir() and ((staging_dir / target_mod) / "Win32").is_dir():
+            compiled_mod_dir = staging_dir / target_mod
+        elif mods_dir and (mods_dir / target_mod).is_dir():
+            compiled_mod_dir = mods_dir / target_mod
+        elif (staging_dir / target_mod).is_dir():
+            compiled_mod_dir = staging_dir / target_mod
+
+        if compiled_mod_dir is None or not compiled_mod_dir.exists():
+            self.report({'WARNING'}, f"ReSkate: Compiled mod folder '{target_mod}' not found. Compile the pack first.")
             return {'CANCELLED'}
 
         info = compiler_bridge.inspect_existing_mod_props(target_mod, use_cache=False)
         prop_names = info.get("prop_names", [])
 
-        safe_pack = target_mod.replace("-", "_").replace(" ", "_")
-        if safe_pack.lower().startswith(f"{author.lower()}_"):
-            safe_pack = safe_pack[len(author) + 1:]
+        raw_pack_part = target_mod
+        if raw_pack_part.lower().startswith(f"{author_raw.lower()}-") or raw_pack_part.lower().startswith(f"{author_raw.lower()}_"):
+            raw_pack_part = raw_pack_part[len(author_raw) + 1:]
+        elif raw_pack_part.lower().startswith(f"{author.lower()}-") or raw_pack_part.lower().startswith(f"{author.lower()}_"):
+            raw_pack_part = raw_pack_part[len(author) + 1:]
+
+        # Thunderstore package names can ONLY contain a-z, A-Z, 0-9, and _
+        safe_pack = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_pack_part).strip("_")[:128] or "Custom_Props"
 
         zip_name = f"{author}-{safe_pack}-{version}.zip"
-        zip_path = staging_dir / zip_name
+        out_dir = mods_dir if (mods_dir and mods_dir.is_dir()) else staging_dir
+        zip_path = out_dir / zip_name
 
         ts_manifest = {
             "name": safe_pack,
             "author": author,
             "version_number": version,
             "website_url": "",
-            "description": desc[:250],
+            "description": (desc or "Custom skateable props built with ReSkate Prop Studio")[:250],
             "dependencies": [],
         }
 
@@ -8028,6 +8048,12 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                 p_rm = Path(bpy.path.abspath(custom_readme_p))
                 if p_rm.exists() and p_rm.is_file():
                     readme_text = p_rm.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                readme_text = ""
+
+        if not readme_text and (compiled_mod_dir / "README.md").exists():
+            try:
+                readme_text = (compiled_mod_dir / "README.md").read_text(encoding="utf-8", errors="replace")
             except Exception:
                 readme_text = ""
 
@@ -8042,7 +8068,7 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                         "family_title": str(m_o.get("reskate_family_title") or ""),
                     })
             readme_text = compiler_bridge.generate_pack_readme_markdown({
-                "pack_name": target_mod,
+                "pack_name": safe_pack,
                 "author_name": author,
                 "pack_version": version,
                 "pack_description": desc,
@@ -8055,10 +8081,11 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
             "# Changelog",
             "",
             f"## [{version}] - {time.strftime('%Y-%m-%d')}",
-            f"- Built with ReSkate Prop Studio v{compiler_bridge.ADDON_VERSION} (Coexistence Mode enabled).",
+            f"- Built with ReSkate Prop Studio v{compiler_bridge.ADDON_VERSION}.",
         ]
+        changelog_text = "\n".join(changelog_lines) + "\n"
 
-        # Find a 256x256 icon PNG (prefer explicit mod_icon_path if selected, else fallback to first prop thumbnail)
+        # Find a 256x256 icon PNG (prefer explicit mod_icon_path, then compiled_mod_dir/icon.png, then staging thumbnail)
         icon_bytes = None
         custom_mod_icon = (getattr(prop, "mod_icon_path", "") or "").strip() if prop else ""
         if custom_mod_icon:
@@ -8073,6 +8100,16 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                     icon_bytes = buf.getvalue()
             except Exception:
                 icon_bytes = None
+        if icon_bytes is None and (compiled_mod_dir / "icon.png").exists():
+            try:
+                import io as _io
+                from PIL import Image
+                im = Image.open(compiled_mod_dir / "icon.png").convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS)
+                buf = _io.BytesIO()
+                im.save(buf, "PNG")
+                icon_bytes = buf.getvalue()
+            except Exception:
+                icon_bytes = (compiled_mod_dir / "icon.png").read_bytes()
         obj = get_target_mesh_object(context)
         if icon_bytes is None and obj:
             slug = get_prop_slug(context, obj)
@@ -8094,16 +8131,59 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
             except Exception:
                 icon_bytes = b""
 
+        manifest_json_str = json.dumps(ts_manifest, indent=2) + "\n"
+        readme_final_str = readme_text if readme_text.endswith("\n") else (readme_text + "\n")
+
+        # Also keep the compiled mod folder's root metadata files Thunderstore-valid in case the user zips the folder manually
+        try:
+            (compiled_mod_dir / "manifest.json").write_text(manifest_json_str, encoding="utf-8")
+            (compiled_mod_dir / "README.md").write_text(readme_final_str, encoding="utf-8")
+            (compiled_mod_dir / "CHANGELOG.md").write_text(changelog_text, encoding="utf-8")
+            if icon_bytes:
+                (compiled_mod_dir / "icon.png").write_bytes(icon_bytes)
+        except Exception:
+            pass
+
+        skip_root_names = {"manifest.json", "readme.md", "changelog.md", "icon.png"}
+        skip_dirs = {".reskate_source", "__pycache__", ".git"}
+
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.write(fbmod_p, arcname=fbmod_p.name)
-            zf.writestr("manifest.json", json.dumps(ts_manifest, indent=2))
-            zf.writestr("README.md", readme_text if readme_text.endswith("\n") else (readme_text + "\n"))
-            zf.writestr("CHANGELOG.md", "\n".join(changelog_lines) + "\n")
+            # 1. Write required Thunderstore root files
+            zf.writestr("manifest.json", manifest_json_str)
+            zf.writestr("README.md", readme_final_str)
+            zf.writestr("CHANGELOG.md", changelog_text)
             if icon_bytes:
                 zf.writestr("icon.png", icon_bytes)
 
+            # 2. Write all compiled mod files (Win32/, layout.toc, initfs_win32, reskate-objects.json, etc.) at root of .zip
+            for item_p in sorted(compiled_mod_dir.rglob("*")):
+                if not item_p.is_file():
+                    continue
+                rel_p = item_p.relative_to(compiled_mod_dir)
+                if any(part in skip_dirs for part in rel_p.parts):
+                    continue
+                if len(rel_p.parts) == 1 and rel_p.name.lower() in skip_root_names:
+                    continue
+                if item_p.suffix.lower() in (".zip", ".fbmod", ".bak"):
+                    continue
+                arc_str = str(rel_p).replace("\\", "/")
+                zf.write(item_p, arcname=arc_str)
+
+        # Also copy to staging_dir if out_dir != staging_dir
+        try:
+            if out_dir != staging_dir:
+                shutil.copy2(zip_path, staging_dir / zip_name)
+        except Exception:
+            pass
+
+        # Reveal the exported .zip in Windows Explorer so the user can immediately drag it into Thunderstore
+        try:
+            subprocess.Popen(["explorer", f"/select,{str(zip_path)}"])
+        except Exception:
+            pass
+
         _maybe_auto_bump_pack_version(prop)
-        self.report({'INFO'}, f"ReSkate: Exported Thunderstore release '{zip_path.name}'.")
+        self.report({'INFO'}, f"ReSkate: Exported Thunderstore package '{zip_path.name}' to {zip_path.parent}")
         return {'FINISHED'}
 
 
