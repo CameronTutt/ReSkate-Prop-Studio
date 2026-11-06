@@ -2165,6 +2165,35 @@ def _draw_simple_mode_wizard(layout, context, prop, metrics):
 # Top-Level Main Header & 3-Mode Switcher (`RESKATE_PT_main_panel`)
 # ============================================================================
 
+def _draw_session_update_banner(layout):
+    """Draws a zero-overhead update notification banner at the very top of the N-panel when a newer GitHub release exists."""
+    try:
+        if hasattr(compiler_bridge, "ensure_session_update_check"):
+            compiler_bridge.ensure_session_update_check()
+        latest_tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "")
+        dismissed = bool(getattr(compiler_bridge, "_SESSION_UPDATE_DISMISSED", False))
+        if not latest_tag or dismissed:
+            return
+        cur_ver = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "0.32.3") or "0.32.3")
+        rel_url = str(
+            getattr(compiler_bridge, "_SESSION_UPDATE_HTML_URL", "")
+            or "https://github.com/CameronTutt/ReSkate-Prop-Studio/releases/latest"
+        )
+        upd_box = layout.box()
+        top_row = upd_box.row(align=True)
+        lbl_sub = top_row.row(align=True)
+        lbl_sub.alert = True
+        lbl_sub.label(text=f"🆕 Update Available: v{latest_tag} (You have v{cur_ver})", icon='INFO')
+        top_row.operator("reskate.dismiss_update_banner", text="", icon='PANEL_CLOSE', emboss=False)
+
+        btn_row = upd_box.row(align=True)
+        btn_row.scale_y = 1.25
+        op_url = btn_row.operator("wm.url_open", text=f"Download v{latest_tag} on GitHub", icon='URL')
+        op_url.url = rel_url
+    except Exception:
+        pass
+
+
 class RESKATE_PT_main_panel(RESKATE_PT_base, Panel):
     bl_idname = "RESKATE_PT_main_panel"
     bl_label = "ReSkate Prop Studio"
@@ -2179,6 +2208,9 @@ class RESKATE_PT_main_panel(RESKATE_PT_base, Panel):
         prop = getattr(scene, "reskate_prop", None)
         ui_mode = _get_ui_mode(context)
         metrics = get_active_mesh_metrics(context)
+
+        # Top-of-N-panel automatic session update notification banner
+        _draw_session_update_banner(layout)
 
         # Synchronize 2D/3D GPU draw handlers with source-level Preferences switches and clean up live thumbnail rig if exited
         try:

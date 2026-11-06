@@ -6259,30 +6259,50 @@ def has_copied_thumb_lighting_preset(context=None) -> bool:
 def _apply_lighting_dict_to_object_and_prop(obj: bpy.types.Object | None, prop, data: dict):
     """Applies a copied thumbnail lighting & background dict to `prop` (if active) and persists it on `obj`."""
     if prop is not None:
-        if "thumb_bg_preset" in data:
-            prop.thumb_bg_preset = str(data["thumb_bg_preset"])
-        if "thumb_floor_color" in data:
-            prop.thumb_floor_color = tuple(float(v) for v in data["thumb_floor_color"][:3])
-        if "thumb_bg_color" in data:
-            prop.thumb_bg_color = tuple(float(v) for v in data["thumb_bg_color"][:3])
-        if "thumb_key_fill_ratio" in data:
-            prop.thumb_key_fill_ratio = float(data["thumb_key_fill_ratio"])
-        if "thumb_sun_rotation" in data:
-            prop.thumb_sun_rotation = float(data["thumb_sun_rotation"])
-        if "thumb_sun_elevation" in data:
-            prop.thumb_sun_elevation = float(data["thumb_sun_elevation"])
-        if "thumb_exposure" in data:
-            prop.thumb_exposure = float(data["thumb_exposure"])
-        if "thumb_bg_style" in data:
-            prop.thumb_bg_style = str(data["thumb_bg_style"])
-        if "thumb_use_cyclorama_floor" in data:
-            prop.thumb_use_cyclorama_floor = bool(data["thumb_use_cyclorama_floor"])
+        if obj is not None and obj.type == 'MESH':
+            synced_name = str(prop.get("_active_synced_obj_name", "") or "")
+            if synced_name != obj.name:
+                load_prop_settings_from_object(prop, obj)
+
+        prev_sync = getattr(properties, "_IS_SYNCING_PROP", False)
+        properties._IS_SYNCING_PROP = True
+        try:
+            if "thumb_bg_preset" in data:
+                prop.thumb_bg_preset = str(data["thumb_bg_preset"])
+            if "thumb_floor_color" in data:
+                prop.thumb_floor_color = tuple(float(v) for v in data["thumb_floor_color"][:3])
+            if "thumb_bg_color" in data:
+                prop.thumb_bg_color = tuple(float(v) for v in data["thumb_bg_color"][:3])
+            if "thumb_key_fill_ratio" in data:
+                prop.thumb_key_fill_ratio = float(data["thumb_key_fill_ratio"])
+            if "thumb_sun_rotation" in data:
+                prop.thumb_sun_rotation = float(data["thumb_sun_rotation"])
+            if "thumb_sun_elevation" in data:
+                prop.thumb_sun_elevation = float(data["thumb_sun_elevation"])
+            if "thumb_exposure" in data:
+                prop.thumb_exposure = float(data["thumb_exposure"])
+            if "thumb_bg_style" in data:
+                prop.thumb_bg_style = str(data["thumb_bg_style"])
+            if "thumb_use_cyclorama_floor" in data:
+                prop.thumb_use_cyclorama_floor = bool(data["thumb_use_cyclorama_floor"])
+            if "thumb_lighting_mode" in data:
+                prop.thumb_lighting_mode = str(data["thumb_lighting_mode"])
+            if "thumb_rim_tint" in data:
+                prop.thumb_rim_tint = tuple(float(v) for v in data["thumb_rim_tint"][:3])
+        finally:
+            properties._IS_SYNCING_PROP = prev_sync
 
     if obj is not None and obj.type == 'MESH':
         st = get_or_init_object_prop_state(obj)
         for k, v in data.items():
-            st[k] = v
+            if isinstance(v, (list, tuple)):
+                st[k] = [round(float(x), 4) for x in v[:3]]
+            else:
+                st[k] = v
         save_object_prop_state(obj, st)
+        if prop is not None:
+            prop["_active_synced_obj_name"] = obj.name
+            prop["_slug_owner_obj"] = obj.name
 
 
 class RESKATE_OT_copy_thumb_lighting_preset(bpy.types.Operator):
@@ -6296,6 +6316,10 @@ class RESKATE_OT_copy_thumb_lighting_preset(bpy.types.Operator):
         prop = getattr(context.scene, "reskate_prop", None)
         if not prop:
             return {'CANCELLED'}
+        active_obj = get_target_mesh_object(context) or context.active_object
+        if active_obj and getattr(active_obj, "type", None) == 'MESH':
+            if str(prop.get("_active_synced_obj_name", "") or "") != active_obj.name:
+                load_prop_settings_from_object(prop, active_obj)
         data = {
             "thumb_bg_preset": str(getattr(prop, "thumb_bg_preset", "SUNNY_DAY") or "SUNNY_DAY"),
             "thumb_floor_color": [float(v) for v in getattr(prop, "thumb_floor_color", (0.22, 0.24, 0.27))],
@@ -6306,6 +6330,8 @@ class RESKATE_OT_copy_thumb_lighting_preset(bpy.types.Operator):
             "thumb_exposure": float(getattr(prop, "thumb_exposure", 0.0)),
             "thumb_bg_style": str(getattr(prop, "thumb_bg_style", "STUDIO_DARK") or "STUDIO_DARK"),
             "thumb_use_cyclorama_floor": bool(getattr(prop, "thumb_use_cyclorama_floor", True)),
+            "thumb_lighting_mode": str(getattr(prop, "thumb_lighting_mode", "STUDIO_CYCLORAMA") or "STUDIO_CYCLORAMA"),
+            "thumb_rim_tint": [float(v) for v in getattr(prop, "thumb_rim_tint", (0.45, 0.72, 1.0))],
         }
         _COPIED_THUMB_LIGHTING_PRESET.clear()
         _COPIED_THUMB_LIGHTING_PRESET.update(data)
@@ -6318,10 +6344,10 @@ class RESKATE_OT_copy_thumb_lighting_preset(bpy.types.Operator):
 
 
 class RESKATE_OT_paste_thumb_lighting_preset(bpy.types.Operator):
-    """Pastes the copied Thumbnail Lighting & Background preset onto the active prop (and any other selected props)"""
+    """Pastes the copied Thumbnail Lighting & Background preset onto the active prop"""
     bl_idname = "reskate.paste_thumb_lighting_preset"
     bl_label = "Paste Lighting"
-    bl_description = "Pastes the copied thumbnail lighting & background settings onto the active prop (and all selected props)"
+    bl_description = "Pastes the copied thumbnail lighting & background settings onto the active prop"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -6341,14 +6367,10 @@ class RESKATE_OT_paste_thumb_lighting_preset(bpy.types.Operator):
         active_obj = get_target_mesh_object(context) or context.active_object
         _apply_lighting_dict_to_object_and_prop(active_obj, prop, data)
 
-        sel_meshes = compiler_bridge.get_selected_prop_meshes(context)
-        for s_obj in sel_meshes:
-            if s_obj != active_obj:
-                _apply_lighting_dict_to_object_and_prop(s_obj, None, data)
-
         sync_live_thumbnail_preview_rig(context)
-        n_applied = max(1, len(sel_meshes))
-        self.report({'INFO'}, f"ReSkate: Pasted thumbnail lighting preset onto {n_applied} prop(s).")
+        compiler_bridge.invalidate_ui_caches()
+        target_label = active_obj.name if active_obj else "active prop"
+        self.report({'INFO'}, f"ReSkate: Pasted '{data.get('thumb_bg_preset', 'CUSTOM')}' lighting preset onto '{target_label}'.")
         return {'FINISHED'}
 
 
@@ -6360,8 +6382,24 @@ class RESKATE_OT_apply_thumb_lighting_to_selected(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        prop = getattr(context.scene, "reskate_prop", None)
+        if not prop:
+            return {'CANCELLED'}
         bpy.ops.reskate.copy_thumb_lighting_preset()
-        return bpy.ops.reskate.paste_thumb_lighting_preset()
+        data = dict(_COPIED_THUMB_LIGHTING_PRESET)
+        if not data:
+            return {'CANCELLED'}
+        active_obj = get_target_mesh_object(context) or context.active_object
+        _apply_lighting_dict_to_object_and_prop(active_obj, prop, data)
+        sel_meshes = compiler_bridge.get_selected_prop_meshes(context)
+        for s_obj in sel_meshes:
+            if s_obj != active_obj:
+                _apply_lighting_dict_to_object_and_prop(s_obj, None, data)
+        sync_live_thumbnail_preview_rig(context)
+        compiler_bridge.invalidate_ui_caches()
+        n_applied = max(1, len(sel_meshes))
+        self.report({'INFO'}, f"ReSkate: Applied thumbnail lighting preset to {n_applied} selected prop(s).")
+        return {'FINISHED'}
 
 
 class RESKATE_OT_group_selected_as_variants(bpy.types.Operator):
@@ -7609,7 +7647,7 @@ class RESKATE_OT_select_pack_or_scene_props(bpy.types.Operator):
         else:
             context.view_layer.objects.active = selected_objs[0]
 
-        sync_active_object_props(context.scene)
+        sync_active_object_props(context)
 
         if self.frame_view:
             try:
@@ -8655,9 +8693,7 @@ class RESKATE_OT_copy_settings_to_selected(bpy.types.Operator):
                             mm.inputs["To Min"].default_value = (1.0 - m_mix) * m_val
                             mm.inputs["To Max"].default_value = (1.0 - m_mix) * m_val + m_mix
 
-            ser_dst = json.dumps(dst_state)
-            dst_obj["reskate_prop_state"] = ser_dst
-            dst_obj["reskate_prop_state_json"] = ser_dst
+            save_object_prop_state(dst_obj, dst_state)
 
         compiler_bridge.invalidate_ui_caches()
         label = "Collision & Finish" if mode == "BOTH" else ("Collision" if mode == "COLLISION" else "Finish")
@@ -10168,9 +10204,7 @@ class RESKATE_OT_apply_category_to_selected(bpy.types.Operator):
             st = dict(get_or_init_object_prop_state(o))
             st["prop_category"] = cat
             st["custom_qd_tab"] = custom_tab
-            ser_o = json.dumps(st)
-            o["reskate_prop_state"] = ser_o
-            o["reskate_prop_state_json"] = ser_o
+            save_object_prop_state(o, st)
 
         compiler_bridge.invalidate_ui_caches()
         self.report({'INFO'}, f"ReSkate: Applied Quick Drop Tab '{custom_tab}' to {len(sel_objs)} selected prop(s).")
@@ -10181,7 +10215,7 @@ class RESKATE_OT_select_saved_qd_tab(bpy.types.Operator):
     """Selects a Quick Drop Tab Name used in this Prop Pack (or saved shortcuts) in 1 click"""
     bl_idname = "reskate.select_saved_qd_tab"
     bl_label = "Select Quick Drop Tab"
-    bl_description = "Applies this Quick Drop Tab Name to the active prop (and all selected props if 2+ are selected)"
+    bl_description = "Applies this Quick Drop Tab Name to the active prop"
     bl_options = {'REGISTER', 'UNDO'}
 
     tab_id: StringProperty(name="Tab ID", default="CustomProps")
@@ -10198,23 +10232,20 @@ class RESKATE_OT_select_saved_qd_tab(bpy.types.Operator):
             if hasattr(properties, "format_qd_tab_display_name")
             else raw_val
         )
+        active_obj = get_target_mesh_object(context) or context.active_object
+        if active_obj and getattr(active_obj, "type", None) == 'MESH':
+            if str(prop.get("_active_synced_obj_name", "") or "") != active_obj.name:
+                load_prop_settings_from_object(prop, active_obj)
         prop.prop_category = 'CUSTOM_TAB'
         prop.custom_qd_tab = disp_val
         if hasattr(properties, "save_custom_qd_tab"):
             properties.save_custom_qd_tab(disp_val)
-
-        sel_objs = compiler_bridge.get_selected_prop_meshes(context)
-        if len(sel_objs) >= 2:
-            for o in sel_objs:
-                st = dict(get_or_init_object_prop_state(o))
-                st["prop_category"] = 'CUSTOM_TAB'
-                st["custom_qd_tab"] = disp_val
-                ser_o = json.dumps(st)
-                o["reskate_prop_state"] = ser_o
-                o["reskate_prop_state_json"] = ser_o
-            self.report({'INFO'}, f"ReSkate: Selected Quick Drop tab '{disp_val}' on {len(sel_objs)} selected props.")
-        else:
-            self.report({'INFO'}, f"ReSkate: Selected Quick Drop tab '{disp_val}'.")
+        if active_obj and getattr(active_obj, "type", None) == 'MESH':
+            st = dict(get_or_init_object_prop_state(active_obj))
+            st["prop_category"] = 'CUSTOM_TAB'
+            st["custom_qd_tab"] = disp_val
+            save_object_prop_state(active_obj, st)
+        self.report({'INFO'}, f"ReSkate: Selected Quick Drop tab '{disp_val}'.")
         compiler_bridge.invalidate_ui_caches()
         return {'FINISHED'}
 
@@ -11986,7 +12017,9 @@ class RESKATE_OT_carousel_step(bpy.types.Operator):
 
         prop = getattr(context.scene, "reskate_prop", None)
         if prop and active and active.type == 'MESH':
-            save_prop_settings_to_object(active, prop)
+            synced_name = str(prop.get("_active_synced_obj_name", "") or "")
+            if synced_name == active.name:
+                save_prop_settings_to_object(prop, active)
 
         try:
             target_obj.select_set(True)
@@ -11994,11 +12027,22 @@ class RESKATE_OT_carousel_step(bpy.types.Operator):
             pass
         context.view_layer.objects.active = target_obj
         if prop:
-            load_prop_settings_from_object(target_obj, prop)
+            load_prop_settings_from_object(prop, target_obj)
+            prop["_active_synced_obj_name"] = target_obj.name
+            prop["_slug_owner_obj"] = target_obj.name
 
         sync_thumbnail_camera_on_prop_switch(context, target_obj)
+        try:
+            from . import ui_panels
+            if hasattr(ui_panels, "on_active_prop_switched"):
+                ui_panels.on_active_prop_switched()
+        except Exception:
+            pass
         compiler_bridge.invalidate_ui_caches()
         gpu_draw.invalidate_gpu_caches()
+        if getattr(context, "screen", None):
+            for area in context.screen.areas:
+                area.tag_redraw()
         return {'FINISHED'}
 
 
@@ -12101,9 +12145,13 @@ class RESKATE_OT_check_for_updates(bpy.types.Operator):
                 if _ver_tuple(tag_name) > _ver_tuple(current_ver):
                     status_msg = f"🆕 Update available: v{tag_name} (installed: v{current_ver})"
                     latest_url = html_url
+                    compiler_bridge._SESSION_UPDATE_AVAILABLE_TAG = tag_name
+                    compiler_bridge._SESSION_UPDATE_HTML_URL = html_url
+                    compiler_bridge._SESSION_UPDATE_DISMISSED = False
                 else:
                     status_msg = f"✅ Up to date (v{current_ver} is the latest release on GitHub)"
                     latest_url = ""
+                    compiler_bridge._SESSION_UPDATE_AVAILABLE_TAG = ""
         except Exception as exc:
             status_msg = f"⚠️ Couldn't reach GitHub ({exc})"
             latest_url = f"{repo_url}/releases"
@@ -12118,6 +12166,21 @@ class RESKATE_OT_check_for_updates(bpy.types.Operator):
             for area in context.screen.areas:
                 area.tag_redraw()
         self.report({'INFO'}, f"ReSkate Update Check: {status_msg}")
+        return {'FINISHED'}
+
+
+class RESKATE_OT_dismiss_update_banner(bpy.types.Operator):
+    """Dismisses the N-Panel update available notification banner for the rest of this Blender session"""
+    bl_idname = "reskate.dismiss_update_banner"
+    bl_label = "Dismiss Update Notification"
+    bl_description = "Hides the update notification banner at the top of the ReSkate panel for the rest of this Blender session"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        compiler_bridge._SESSION_UPDATE_DISMISSED = True
+        if getattr(context, "screen", None):
+            for area in context.screen.areas:
+                area.tag_redraw()
         return {'FINISHED'}
 
 
@@ -12276,6 +12339,7 @@ CLASSES = (
     RESKATE_OT_copy_compile_log,
     RESKATE_OT_copy_compiler_log,
     RESKATE_OT_check_for_updates,
+    RESKATE_OT_dismiss_update_banner,
     RESKATE_OT_queue_add_active,
     RESKATE_OT_queue_sync_item,
     RESKATE_OT_queue_sync_all,

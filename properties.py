@@ -2087,20 +2087,32 @@ def resolve_active_prop_mesh(context=None) -> bpy.types.Object | None:
     ctx = context if context is not None else bpy.context
     if ctx is None:
         return None
-    obj = getattr(ctx, "active_object", None)
+    obj = None
+    vl = getattr(ctx, "view_layer", None)
+    if vl is not None and getattr(vl, "objects", None) is not None:
+        obj = vl.objects.active
     if obj is None:
-        vl = getattr(ctx, "view_layer", None)
-        if vl is not None and getattr(vl, "objects", None) is not None:
-            obj = vl.objects.active
+        obj = getattr(ctx, "active_object", None)
     sel_objs = list(getattr(ctx, "selected_objects", ()) or ())
+    scene = getattr(ctx, "scene", None) or getattr(bpy.context, "scene", None)
+    last_synced = ""
+    last_was_selected = False
+    if scene is not None:
+        try:
+            prop = getattr(scene, "reskate_prop", None)
+            if prop is not None:
+                last_synced = str(super(ReSkatePropSettings, prop).__getattribute__("get")("_active_synced_obj_name", "") or "")
+                last_was_selected = bool(super(ReSkatePropSettings, prop).__getattribute__("get")("_active_synced_was_selected", False))
+        except Exception:
+            pass
     if obj is not None:
         try:
             obj_is_selected = bool(obj.select_get()) or (obj in sel_objs) or (getattr(obj, "mode", "OBJECT") != 'OBJECT')
         except Exception:
             obj_is_selected = True
-        # If the user box-selected a prop in the viewport while an older unselected object is still `active_object`,
-        # prefer the actually selected prop mesh in `selected_objects`!
-        if not obj_is_selected and sel_objs:
+        # If the user box-selected a prop in the viewport while the previously-selected synced object remained `active_object` (now unselected),
+        # prefer the newly selected prop mesh in `selected_objects`!
+        if not obj_is_selected and sel_objs and last_synced and obj.name == last_synced and last_was_selected:
             for sel_o in sel_objs:
                 sel_resolved = resolve_collision_to_owner_prop(sel_o)
                 if sel_resolved is not None:
@@ -2254,6 +2266,33 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
             state["prop_family_title"] = str(obj.get("reskate_family_title") or "").strip()
         state["thumb_variant_cutout_enabled"] = False
 
+        # Self-heal if an earlier unsynced carousel switch accidentally overwrote this object's display name / ID with another object's name or default
+        saved_disp = str(state.get("prop_display_name") or "").strip()
+        clean_obj_slug = _clean_slug_id(obj.name)
+        clean_disp_slug = _clean_slug_id(saved_disp)
+        contaminated_by_other = False
+        if not saved_disp or (saved_disp == "My Custom Prop" and obj.name != "My Custom Prop"):
+            contaminated_by_other = True
+        elif clean_disp_slug != clean_obj_slug and not bool(obj.get("reskate_user_renamed_display", False)):
+            for other_o in bpy.data.objects:
+                if other_o != obj and getattr(other_o, "type", None) == 'MESH':
+                    if other_o.name == saved_disp or _clean_slug_id(other_o.name) == clean_disp_slug:
+                        contaminated_by_other = True
+                        break
+        if contaminated_by_other:
+            state["prop_display_name"] = obj.name
+            state["prop_id"] = clean_obj_slug
+            state["prop_key_slug"] = f"own_customprops_{clean_obj_slug}"
+            try:
+                obj["reskate_display_name"] = obj.name
+                obj["reskate_prop_id"] = clean_obj_slug
+                obj["reskate_key_slug"] = state["prop_key_slug"]
+                ser_healed = json.dumps(state)
+                obj["reskate_prop_state"] = ser_healed
+                obj["reskate_prop_state_json"] = ser_healed
+            except Exception:
+                pass
+
     # Whenever look_preset is CUSTOM, keep Roughness / Metallic synced from the object's Principled BSDF material
     if state.get("look_preset", "CUSTOM") == "CUSTOM":
         try:
@@ -2307,6 +2346,13 @@ def save_prop_settings_to_object(prop, obj: bpy.types.Object | None):
         return
     if obj.name.endswith("_COL") or getattr(getattr(obj, "reskate_col_prop", None), "is_col_proxy", False):
         return
+    # Never overwrite `obj` if `prop` is still synced to a DIFFERENT existing object in the scene!
+    try:
+        synced_name = str(super(ReSkatePropSettings, prop).__getattribute__("get")("_active_synced_obj_name", "") or "")
+        if synced_name and synced_name != obj.name and not _IN_NAME_SYNC and synced_name in bpy.data.objects:
+            return
+    except Exception:
+        pass
     state = {}
     for k, default_v in _PER_PROP_DEFAULTS.items():
         try:
@@ -2356,6 +2402,10 @@ def save_prop_settings_to_object(prop, obj: bpy.types.Object | None):
         if hasattr(obj, "reskate_custom_placement_proxy_object") and getattr(obj, "reskate_custom_placement_proxy_object", None) != pphys_obj:
             obj.reskate_custom_placement_proxy_object = pphys_obj
         prop["_active_synced_obj_name"] = obj.name
+        try:
+            prop["_active_synced_was_selected"] = bool(obj.select_get())
+        except Exception:
+            prop["_active_synced_was_selected"] = True
         prop["_slug_owner_obj"] = obj.name
         invalidate_prop_state_caches(obj)
     except Exception:
@@ -2412,15 +2462,6 @@ def load_prop_settings_from_object(prop, obj: bpy.types.Object | None) -> bool:
         for k, default_v in _PER_PROP_DEFAULTS.items():
             val = state.get(k, default_v)
             try:
-                cur_v = super(ReSkatePropSettings, prop).__getattribute__(k)
-                if isinstance(default_v, list) and hasattr(cur_v, "__len__"):
-                    if [round(float(x), 4) for x in cur_v] == [round(float(x), 4) for x in val]:
-                        continue
-                elif isinstance(default_v, float) and isinstance(cur_v, (int, float)):
-                    if abs(float(cur_v) - float(val)) < 1e-6:
-                        continue
-                elif cur_v == val:
-                    continue
                 setattr(prop, k, val)
             except Exception:
                 pass
@@ -2448,6 +2489,10 @@ def load_prop_settings_from_object(prop, obj: bpy.types.Object | None) -> bool:
             pass
 
         prop["_active_synced_obj_name"] = obj.name
+        try:
+            prop["_active_synced_was_selected"] = bool(obj.select_get())
+        except Exception:
+            prop["_active_synced_was_selected"] = True
         prop["_slug_owner_obj"] = obj.name
         if state.get("custom_thumb_png"):
             prop["custom_thumb_owner"] = obj.name
@@ -2471,7 +2516,11 @@ def sync_active_object_props(context=None) -> bool:
     ctx = context if context is not None else bpy.context
     if ctx is None:
         return False
-    scene = getattr(ctx, "scene", None)
+    if isinstance(ctx, bpy.types.Scene):
+        scene = ctx
+        ctx = bpy.context
+    else:
+        scene = getattr(ctx, "scene", None) or getattr(bpy.context, "scene", None)
     if scene is None:
         return False
     prop = getattr(scene, "reskate_prop", None)
@@ -2623,21 +2672,48 @@ _IN_NAME_SYNC: bool = False
 
 
 def _extra_update_prop_name(self, context):
-    global _IN_NAME_SYNC
-    clean = _clean_slug_id(self.prop_display_name)
+    global _IN_NAME_SYNC, _SANCTUS_CAROUSEL_CACHE
+    raw_disp = str(super(ReSkatePropSettings, self).__getattribute__("prop_display_name") or "").strip()
+    clean = _clean_slug_id(raw_disp)
     obj = resolve_active_prop_mesh(context)
-    cur_id = getattr(self, "prop_id", "")
+    cur_id = str(super(ReSkatePropSettings, self).__getattribute__("prop_id") or "")
     stable_key = str(obj.get("reskate_stable_prop_key", "") or "").strip() if obj is not None else ""
 
-    # Two-way sync: keep the Blender object's name in sync with Prop Name (with re-entrancy guard)
+    # Two-way sync: keep the Blender object's name in the Outliner in sync with Prop Name (with re-entrancy guard)
     if obj is not None and not _IN_NAME_SYNC:
-        new_disp = str(self.prop_display_name or "").strip()
+        new_disp = raw_disp
         if new_disp and obj.name != new_disp:
             _IN_NAME_SYNC = True
             try:
+                old_name = obj.name
+                # Clear any 0-user orphaned object squatting on `new_disp` so Blender doesn't append .001
+                existing_other = bpy.data.objects.get(new_disp)
+                if existing_other is not None and existing_other != obj and getattr(existing_other, "users", 1) == 0:
+                    try:
+                        bpy.data.objects.remove(existing_other, do_unlink=True)
+                    except Exception:
+                        pass
                 obj.name = new_disp
+                if getattr(obj, "data", None) is not None and getattr(obj.data, "users", 0) == 1:
+                    try:
+                        obj.data.name = obj.name
+                    except Exception:
+                        pass
+                try:
+                    _LAST_OBJ_NAMES[obj.as_pointer()] = obj.name
+                except Exception:
+                    pass
                 self["_active_synced_obj_name"] = obj.name
                 self["_slug_owner_obj"] = obj.name
+                # Keep linked _COL / _PPHYS owner and Thumbnail Camera target references in sync with the new object name
+                for o_cand in bpy.data.objects:
+                    if o_cand != obj:
+                        if str(o_cand.get("reskate_col_owner", "") or "") == old_name:
+                            o_cand["reskate_col_owner"] = obj.name
+                        if getattr(o_cand, "type", None) == 'CAMERA':
+                            for t_k in ("reskate_target_obj", "reskate_framed_target"):
+                                if str(o_cand.get(t_k, "") or "") == old_name:
+                                    o_cand[t_k] = obj.name
             except Exception:
                 pass
             finally:
@@ -2645,9 +2721,27 @@ def _extra_update_prop_name(self, context):
 
     if obj is not None:
         try:
-            obj["reskate_display_name"] = self.prop_display_name
+            obj["reskate_display_name"] = raw_disp
+            obj["reskate_user_renamed_display"] = True
         except Exception:
             pass
+
+    _SANCTUS_CAROUSEL_CACHE = (0.0, (), [])
+    try:
+        from . import compiler_bridge
+        compiler_bridge.invalidate_ui_caches()
+    except Exception:
+        pass
+    try:
+        wm = getattr(context, "window_manager", None) or getattr(bpy.context, "window_manager", None)
+        if wm:
+            for win in wm.windows:
+                if win.screen:
+                    for area in win.screen.areas:
+                        if area.type in ('OUTLINER', 'VIEW_3D', 'PROPERTIES'):
+                            area.tag_redraw()
+    except Exception:
+        pass
 
     # If the prop has already been compiled and locked a stable internal key (§5.4), preserve its internal key so packs update in-place
     if stable_key:
@@ -3617,21 +3711,28 @@ def _set_sanctus_carousel_index(self, value: int):
     if target_obj is None or getattr(target_obj, "type", None) != 'MESH':
         return
     active = resolve_active_prop_mesh(ctx)
-    if active and active.type == 'MESH' and active != target_obj:
+    synced_name = str(self.get("_active_synced_obj_name", "") or "")
+    if active and active.type == 'MESH' and active != target_obj and synced_name == active.name:
         save_prop_settings_to_object(self, active)
     try:
         target_obj.select_set(True)
         ctx.view_layer.objects.active = target_obj
     except Exception:
         pass
-    sync_active_object_props(ctx)
+    load_prop_settings_from_object(self, target_obj)
+    try:
+        from . import operators, ui_panels
+        if hasattr(operators, "sync_thumbnail_camera_on_prop_switch"):
+            operators.sync_thumbnail_camera_on_prop_switch(ctx, target_obj)
+        if hasattr(ui_panels, "on_active_prop_switched"):
+            ui_panels.on_active_prop_switched()
+    except Exception:
+        pass
     _tag_redraw_view3d(self, ctx)
 
 
-def _update_thumb_bg_preset(self, context):
-    if _IS_SYNCING_PROP:
-        return
-    key = str(getattr(self, "thumb_bg_preset", "SUNNY_DAY") or "SUNNY_DAY").upper()
+def _extra_update_thumb_bg_preset(self, context):
+    key = str(super(ReSkatePropSettings, self).__getattribute__("thumb_bg_preset") or "SUNNY_DAY").upper()
     rgb, bg_style, use_floor, light_mode = _THUMB_BG_PRESET_MAP.get(key, _THUMB_BG_PRESET_MAP['SUNNY_DAY'])
     try:
         if key != 'FLAT_COLOR':
@@ -3641,7 +3742,12 @@ def _update_thumb_bg_preset(self, context):
         self.thumb_lighting_mode = light_mode
     except Exception:
         pass
-    _handle_per_prop_field_write(self, context, "thumb_bg_preset")
+
+
+def _update_thumb_bg_preset(self, context):
+    if _IS_SYNCING_PROP:
+        return
+    _handle_per_prop_field_write(self, context, "thumb_bg_preset", _extra_update_thumb_bg_preset)
     _sync_live_thumb_rig_if_active(self, context)
 
 

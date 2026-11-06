@@ -227,12 +227,74 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.32.2"
+ADDON_VERSION = "0.32.3"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.32.2"
+COMPILER_VERSION = "0.32.3"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
+
+# Once-per-session non-blocking background GitHub update check state
+_SESSION_UPDATE_CHECK_STARTED: bool = False
+_SESSION_UPDATE_AVAILABLE_TAG: str = ""
+_SESSION_UPDATE_HTML_URL: str = ""
+_SESSION_UPDATE_DISMISSED: bool = False
+
+
+def parse_version_tuple(v_str: str) -> tuple[int, ...]:
+    parts = [int(p) for p in re.findall(r"\d+", str(v_str or ""))]
+    return tuple(parts) if parts else (0, 0, 0)
+
+
+def _tag_redraw_all_view3d_for_update_banner():
+    try:
+        wm = getattr(bpy.context, "window_manager", None)
+        if wm:
+            for win in wm.windows:
+                if win.screen:
+                    for area in win.screen.areas:
+                        if area.type == 'VIEW_3D':
+                            area.tag_redraw()
+    except Exception:
+        pass
+    return None
+
+
+def _background_session_update_worker() -> None:
+    global _SESSION_UPDATE_AVAILABLE_TAG, _SESSION_UPDATE_HTML_URL
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            GITHUB_RELEASES_API_URL,
+            headers={"User-Agent": f"ReSkatePropStudio/{ADDON_VERSION_STR}", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        tag_name = str(payload.get("tag_name") or "").strip().lstrip("vV")
+        html_url = str(payload.get("html_url") or f"{GITHUB_REPO_URL}/releases/latest")
+        if tag_name and parse_version_tuple(tag_name) > parse_version_tuple(ADDON_VERSION_STR):
+            _SESSION_UPDATE_AVAILABLE_TAG = tag_name
+            _SESSION_UPDATE_HTML_URL = html_url
+            try:
+                if hasattr(bpy.app, "timers"):
+                    bpy.app.timers.register(_tag_redraw_all_view3d_for_update_banner, first_interval=0.05)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def ensure_session_update_check() -> None:
+    """Fires a single non-blocking daemon thread once per Blender session to check GitHub Releases."""
+    global _SESSION_UPDATE_CHECK_STARTED
+    if _SESSION_UPDATE_CHECK_STARTED or bpy.app.background:
+        return
+    _SESSION_UPDATE_CHECK_STARTED = True
+    try:
+        t = threading.Thread(target=_background_session_update_worker, name="ReSkateSessionUpdateCheck", daemon=True)
+        t.start()
+    except Exception:
+        pass
 
 # Module-level Face Surface Attribute & JSON Property Constants
 FACE_SURFACE_ATTR_NAME = "reskate_face_surface"
