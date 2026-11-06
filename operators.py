@@ -7067,14 +7067,12 @@ def _parse_compiler_output_line(prop, line: str, log_lines: list[str]):
         prop.compile_status_msg = f"Done → {clean[5:].strip()}"
 
 
-def _maybe_auto_bump_pack_version(prop) -> str | None:
+def _maybe_auto_bump_pack_version(prop, current_version: str | None = None) -> str | None:
     """If `prop.auto_bump_pack_version` is enabled, increments the patch version (e.g. 0.1.0 -> 0.1.1) and returns the new version."""
     if not prop or not bool(getattr(prop, "auto_bump_pack_version", True)):
         return None
-    cur = (getattr(prop, "pack_version", "0.1.0") or "0.1.0").strip()
-    toks = [int(t) if t.isdigit() else 0 for t in (cur.split(".") + ["0", "0", "0"])[:3]]
-    toks[2] += 1
-    new_v = f"{toks[0]}.{toks[1]}.{toks[2]}"
+    cur = current_version or (getattr(prop, "pack_version", "0.1.0") or "0.1.0").strip()
+    new_v = compiler_bridge.bump_semver(cur, "PATCH")
     prop.pack_version = new_v
     return new_v
 
@@ -7130,7 +7128,7 @@ def _start_async_or_sync_compile(op_self, context, manifest_path: Path, is_pack:
             prop.compile_progress = 100.0
             if hasattr(prop, "last_compile_error_summary"):
                 prop.last_compile_error_summary = ""
-            _maybe_auto_bump_pack_version(prop)
+            prop.pack_version = compiler_bridge.normalize_semver(getattr(prop, "pack_version", "0.1.0"))
         op_self.report({'INFO'}, f"ReSkate: '{disp_label}' compiled and deployed!")
         return {'FINISHED'}
 
@@ -7293,7 +7291,7 @@ def _handle_compile_modal(op_self, context, event):
                     prop.compile_progress = 100.0
                     if hasattr(prop, "last_compile_error_summary"):
                         prop.last_compile_error_summary = ""
-                    _maybe_auto_bump_pack_version(prop)
+                    prop.pack_version = compiler_bridge.normalize_semver(getattr(prop, "pack_version", "0.1.0"))
                 op_self.report({'INFO'}, f"ReSkate: '{op_self._disp_label}' compiled and deployed!")
                 return {'FINISHED'}
             else:
@@ -8317,15 +8315,7 @@ class RESKATE_OT_bump_pack_version(bpy.types.Operator):
         if not prop:
             return {'CANCELLED'}
         cur = (getattr(prop, "pack_version", "0.1.0") or "0.1.0").strip()
-        toks = [int(t) if t.isdigit() else 0 for t in (cur.split(".") + ["0", "0", "0"])[:3]]
-        p_up = (self.part or "PATCH").upper()
-        if p_up == "MAJOR":
-            toks = [toks[0] + 1, 0, 0]
-        elif p_up == "MINOR":
-            toks = [toks[0], toks[1] + 1, 0]
-        else:
-            toks = [toks[0], toks[1], toks[2] + 1]
-        prop.pack_version = f"{toks[0]}.{toks[1]}.{toks[2]}"
+        prop.pack_version = compiler_bridge.bump_semver(cur, self.part or "PATCH")
         self.report({'INFO'}, f"ReSkate: Pack version bumped to {prop.pack_version}.")
         return {'FINISHED'}
 
@@ -8342,12 +8332,14 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         target_mod = compiler_bridge.get_resolved_target_mod_name(context)
         author_raw = compiler_bridge.get_author_name(context) or "Author"
         author = re.sub(r"[^a-zA-Z0-9_]+", "_", author_raw).strip("_") or "Author"
-        version = (getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0").strip() or "0.1.0"
+        version = compiler_bridge.normalize_semver(getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0")
         desc = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
+        auto_bump = bool(getattr(prop, "auto_bump_pack_version", True)) if prop else True
 
         staging_dir = compiler_bridge.get_staging_dir(context)
         game_dir = compiler_bridge.get_game_dir(context)
         mods_dir = (game_dir / "Mods") if game_dir else None
+        pack_store = compiler_bridge.get_pack_storage_dir(target_mod, staging_dir)
 
         # Locate compiled mod directory in Mods/<target_mod> or Staging/<target_mod>
         compiled_mod_dir = None
@@ -8365,16 +8357,19 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
             return {'CANCELLED'}
 
         info = compiler_bridge.inspect_existing_mod_props(target_mod, use_cache=False)
-        prop_names = info.get("prop_names", [])
+        prop_names = [
+            pn for pn in info.get("prop_names", [])
+            if str(pn).strip() and not str(pn).strip().lower().endswith("pack icon")
+        ] or info.get("prop_names", [])
 
-        raw_pack_part = target_mod
-        if raw_pack_part.lower().startswith(f"{author_raw.lower()}-") or raw_pack_part.lower().startswith(f"{author_raw.lower()}_"):
-            raw_pack_part = raw_pack_part[len(author_raw) + 1:]
-        elif raw_pack_part.lower().startswith(f"{author.lower()}-") or raw_pack_part.lower().startswith(f"{author.lower()}_"):
-            raw_pack_part = raw_pack_part[len(author) + 1:]
-
-        # Thunderstore package names can ONLY contain a-z, A-Z, 0-9, and _
-        safe_pack = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_pack_part).strip("_")[:128] or "Custom_Props"
+        v_info = compiler_bridge.get_existing_pack_version_info(context, target_mod)
+        safe_pack = v_info.get("safe_pack") or compiler_bridge.get_thunderstore_safe_pack_name(target_mod, author_raw)
+        h_zip = v_info.get("highest_zip_version")
+        h_built = v_info.get("highest_built_version")
+        if h_zip and auto_bump and compiler_bridge.parse_semver_tuple(version) <= compiler_bridge.parse_semver_tuple(h_zip):
+            version = compiler_bridge.bump_semver(h_zip, "PATCH")
+        elif h_built and compiler_bridge.parse_semver_tuple(version) < compiler_bridge.parse_semver_tuple(h_built):
+            version = h_built
 
         zip_name = f"{author}-{safe_pack}-{version}.zip"
         out_dir = mods_dir if (mods_dir and mods_dir.is_dir()) else staging_dir
@@ -8391,11 +8386,13 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
 
         custom_readme_p = (getattr(prop, "mod_readme_path", "") or "").strip() if prop else ""
         readme_text = ""
+        used_custom_readme = False
         if custom_readme_p:
             try:
                 p_rm = Path(bpy.path.abspath(custom_readme_p))
                 if p_rm.exists() and p_rm.is_file():
                     readme_text = p_rm.read_text(encoding="utf-8", errors="replace")
+                    used_custom_readme = True
             except Exception:
                 readme_text = ""
 
@@ -8422,16 +8419,47 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                 "pack_description": desc,
                 "props": props_for_readme,
             })
+        elif not used_custom_readme:
+            readme_text = re.sub(
+                r"(?m)^(-\s*\*\*Version:\*\*\s*).*$",
+                rf"\g<1>{version}",
+                readme_text,
+            )
 
         readme_text = compiler_bridge.ensure_pack_readme_footer(readme_text)
 
-        changelog_lines = [
-            "# Changelog",
-            "",
+        # Build CHANGELOG.md while preserving historical `## [x.y.z]` sections across updates
+        existing_cl = ""
+        for cl_cand in (pack_store / "CHANGELOG.md", compiled_mod_dir / "CHANGELOG.md"):
+            if cl_cand.is_file():
+                try:
+                    existing_cl = cl_cand.read_text(encoding="utf-8", errors="replace")
+                    if existing_cl.strip():
+                        break
+                except Exception:
+                    pass
+
+        older_sections: list[str] = []
+        if existing_cl.strip():
+            raw_secs = re.split(r"(?m)(?=^##\s+\[)", existing_cl)
+            for sec in raw_secs:
+                sec_s = sec.strip()
+                if not sec_s.startswith("## ["):
+                    continue
+                m_ver = re.match(r"^##\s+\[([^\]]+)\]", sec_s)
+                if m_ver:
+                    sec_v = compiler_bridge.normalize_semver(m_ver.group(1))
+                    if sec_v == version:
+                        continue
+                older_sections.append(sec_s)
+
+        prop_summary = f" ({len(prop_names)} prop(s): {', '.join(prop_names[:8])}{'...' if len(prop_names) > 8 else ''})" if prop_names else ""
+        new_sec_lines = [
             f"## [{version}] - {time.strftime('%Y-%m-%d')}",
-            f"- Built with ReSkate Prop Studio v{compiler_bridge.ADDON_VERSION}.",
+            f"- Packaged with ReSkate Prop Studio v{compiler_bridge.ADDON_VERSION}{prop_summary}.",
         ]
-        changelog_text = "\n".join(changelog_lines) + "\n"
+        all_cl_blocks = ["\n".join(new_sec_lines)] + older_sections
+        changelog_text = "# Changelog\n\n" + "\n\n".join(all_cl_blocks) + "\n"
 
         # Find a 256x256 icon PNG (prefer explicit mod_icon_path, then compiled_mod_dir/icon.png, then staging thumbnail)
         icon_bytes = None
@@ -8482,13 +8510,35 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         manifest_json_str = json.dumps(ts_manifest, indent=2) + "\n"
         readme_final_str = readme_text if readme_text.endswith("\n") else (readme_text + "\n")
 
-        # Also keep the compiled mod folder's root metadata files Thunderstore-valid in case the user zips the folder manually
+        # Keep the compiled mod folder and pack storage metadata synchronized with the exported release version
+        for sync_dir in (compiled_mod_dir, staging_dir / target_mod, (mods_dir / target_mod) if mods_dir else None):
+            if sync_dir is None or not sync_dir.is_dir():
+                continue
+            try:
+                (sync_dir / "manifest.json").write_text(manifest_json_str, encoding="utf-8")
+                (sync_dir / "README.md").write_text(readme_final_str, encoding="utf-8")
+                (sync_dir / "CHANGELOG.md").write_text(changelog_text, encoding="utf-8")
+                if icon_bytes:
+                    (sync_dir / "icon.png").write_bytes(icon_bytes)
+                for meta_fn in ("compiled_prop_meta.json", "reskate-build.json"):
+                    mp = sync_dir / meta_fn
+                    if mp.is_file():
+                        md = json.loads(mp.read_text(encoding="utf-8", errors="replace"))
+                        if isinstance(md, dict):
+                            md["pack_version"] = version
+                            mp.write_text(json.dumps(md, indent=2), encoding="utf-8")
+            except Exception:
+                pass
         try:
-            (compiled_mod_dir / "manifest.json").write_text(manifest_json_str, encoding="utf-8")
-            (compiled_mod_dir / "README.md").write_text(readme_final_str, encoding="utf-8")
-            (compiled_mod_dir / "CHANGELOG.md").write_text(changelog_text, encoding="utf-8")
-            if icon_bytes:
-                (compiled_mod_dir / "icon.png").write_bytes(icon_bytes)
+            pack_store.mkdir(parents=True, exist_ok=True)
+            (pack_store / "CHANGELOG.md").write_text(changelog_text, encoding="utf-8")
+            for p_fn in ("compiled_prop_meta.json", "pack_registry.json"):
+                pp = pack_store / p_fn
+                if pp.is_file():
+                    pd = json.loads(pp.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(pd, dict):
+                        pd["pack_version"] = version
+                        pp.write_text(json.dumps(pd, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -8530,8 +8580,12 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         except Exception:
             pass
 
-        _maybe_auto_bump_pack_version(prop)
-        self.report({'INFO'}, f"ReSkate: Exported Thunderstore package '{zip_path.name}' to {zip_path.parent}")
+        if prop:
+            prop.pack_version = version
+        next_ver = _maybe_auto_bump_pack_version(prop, current_version=version)
+        compiler_bridge.invalidate_ui_caches()
+        bump_msg = f" (next release version bumped to {next_ver})" if next_ver else ""
+        self.report({'INFO'}, f"ReSkate: Exported Thunderstore package '{zip_path.name}' to {zip_path.parent}{bump_msg}")
         return {'FINISHED'}
 
 

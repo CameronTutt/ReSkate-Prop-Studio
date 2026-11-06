@@ -1868,6 +1868,12 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
 
     if show_ts:
         ts_col = pack_box.column(align=True)
+        ts_safe_pkg = compiler_bridge.get_thunderstore_safe_pack_name(resolved_mod, author_str)
+        ts_ver_norm = compiler_bridge.normalize_semver(getattr(prop, "pack_version", "0.1.0"))
+        ts_col.label(
+            text=f"🔒 Thunderstore ID: {ts_safe_pkg}  |  Version: {ts_ver_norm}",
+            icon='LOCKED',
+        )
         if hasattr(prop, "mod_icon_path"):
             mi_row = ts_col.row(align=True)
             mi_row.prop(prop, "mod_icon_path", text="Pack Icon (icon.png)")
@@ -2161,7 +2167,7 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
                 cp_col.prop(
                     prop,
                     "auto_bump_pack_version",
-                    text="Auto-Increment Patch Version on Compile / Export",
+                    text="Auto-Increment Patch Version on Thunderstore Export",
                 )
 
         # 6. Error Box (only on error) & Open Mod / Output Folder Button
@@ -3701,7 +3707,7 @@ class RESKATE_PT_card6_export(RESKATE_PT_base, Panel):
                 pack_meta_box.prop(
                     prop,
                     "auto_bump_pack_version",
-                    text="Auto-Increment Patch Version on Compile / Export",
+                    text="Auto-Increment Patch Version on Thunderstore Export",
                 )
             pack_meta_box.prop(prop, "pack_description", text="Description")
             if hasattr(prop, "mod_icon_path"):

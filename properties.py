@@ -2814,6 +2814,18 @@ def _extra_update_prop_name(self, context):
     try:
         from . import compiler_bridge
         compiler_bridge.invalidate_ui_caches()
+        try:
+            resolved_mod = compiler_bridge.get_resolved_target_mod_name(context, val)
+            v_info = compiler_bridge.get_existing_pack_version_info(context, resolved_mod)
+            h_zip = v_info.get("highest_zip_version")
+            h_built = v_info.get("highest_built_version")
+            auto_bump = bool(getattr(self, "auto_bump_pack_version", True))
+            if h_zip and auto_bump:
+                self.pack_version = compiler_bridge.bump_semver(h_zip, "PATCH")
+            elif h_built:
+                self.pack_version = h_built
+        except Exception:
+            pass
     except Exception:
         pass
     try:
@@ -5428,9 +5440,9 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
         description="Expand compile caching and automatic pack versioning options",
     )
     auto_bump_pack_version: BoolProperty(
-        name="Auto-Increment Patch Version on Compile / Export",
+        name="Auto-Increment Patch Version on Thunderstore Export",
         default=True,
-        description="Automatically increments the patch version (e.g. 1.0.0 -> 1.0.1) each time you compile or export a Thunderstore .zip",
+        description="Automatically increments the patch version (e.g. 0.1.0 -> 0.1.1) when you export a Thunderstore .zip (and ensures new compiles never reuse an already-exported version)",
     )
     merge_existing_mod: BoolProperty(
         name="Add & Merge into Existing Mod",

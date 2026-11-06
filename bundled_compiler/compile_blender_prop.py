@@ -44,7 +44,7 @@ import site
 import unicodedata
 import zlib
 
-COMPILER_VERSION = "0.33.0"
+COMPILER_VERSION = "0.33.1"
 os.environ["RESKATE_COMPILER_VERSION"] = COMPILER_VERSION
 PIPELINE_MODE = os.environ.get("RESKATE_PIPELINE_MODE", "FAST_OPTIMIZED").strip().upper()
 LOGGED_INPUT_READS: list[str] = []
@@ -5046,7 +5046,13 @@ def compile_blender_props_package(
     coexist_mode = bool(meta.get("coexist_mode", True))
     default_ns = f"{author_name_str}/{mod_name}" if author_name_str else mod_name
     coexist_namespace = str(meta.get("coexist_namespace") or default_ns).strip("/")
-    pack_version = str(meta.get("pack_version", "0.1.0" if coexist_mode else "1.5.0"))
+    raw_pv_str = str(meta.get("pack_version", "0.1.0" if coexist_mode else "1.5.0") or "").strip()
+    pv_nums = [int(x) for x in re.findall(r"\d+", raw_pv_str)]
+    if not pv_nums:
+        pv_nums = [0, 1, 0] if coexist_mode else [1, 5, 0]
+    while len(pv_nums) < 3:
+        pv_nums.append(0)
+    pack_version = f"{pv_nums[0]}.{pv_nums[1]}.{pv_nums[2]}"
     addon_version = meta.get("addon_version", None)
     compiler_version_stamp = COMPILER_VERSION
     build_note = str(meta.get("build_note", "")).strip() or (
@@ -6602,6 +6608,9 @@ def compile_blender_props_package(
                     "",
                 ])
                 (dest_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
+                cl_cache = _get_pack_storage_dir(staging_dir, mod_name) / "CHANGELOG.md"
+                if cl_cache.is_file():
+                    shutil.copy2(cl_cache, dest_dir / "CHANGELOG.md")
             except Exception as rm_err:
                 print(f"  [!] Mod README.md write skipped: {rm_err}", flush=True)
 

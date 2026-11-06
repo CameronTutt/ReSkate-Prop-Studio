@@ -227,9 +227,9 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.33.0"
+ADDON_VERSION = "0.33.1"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.33.0"
+COMPILER_VERSION = "0.33.1"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -518,6 +518,190 @@ def get_resolved_target_mod_name(context=None, target_mod_override: str | None =
                 return cand_with_author
             return f"{clean_author}-{raw_pack}"
     return raw_pack
+
+
+def normalize_semver(version_str: str | None, default: str = "0.1.0") -> str:
+    """
+    Normalizes a version string into strict Thunderstore Semantic Versioning `MAJOR.MINOR.PATCH`
+    (digits only, no leading 'v' or prerelease suffixes, e.g. 'v0.1.0' -> '0.1.0', '0.2' -> '0.2.0').
+    """
+    raw = str(version_str or "").strip()
+    nums = [int(p) for p in re.findall(r"\d+", raw)]
+    if not nums:
+        def_nums = [int(p) for p in re.findall(r"\d+", str(default or "0.1.0"))] + [0, 1, 0]
+        return f"{def_nums[0]}.{def_nums[1]}.{def_nums[2]}"
+    while len(nums) < 3:
+        nums.append(0)
+    return f"{nums[0]}.{nums[1]}.{nums[2]}"
+
+
+def parse_semver_tuple(version_str: str | None) -> tuple[int, int, int]:
+    """Parses a version string into a 3-int `(major, minor, patch)` tuple."""
+    norm = normalize_semver(version_str)
+    parts = [int(x) for x in norm.split(".")[:3]]
+    return (parts[0], parts[1], parts[2])
+
+
+def bump_semver(version_str: str | None, part: str = "PATCH") -> str:
+    """Increments a semantic version string ('MAJOR', 'MINOR', or 'PATCH') and returns strict `X.Y.Z`."""
+    maj, min_v, pat = parse_semver_tuple(version_str)
+    p_up = str(part or "PATCH").strip().upper()
+    if p_up == "MAJOR":
+        return f"{maj + 1}.0.0"
+    if p_up == "MINOR":
+        return f"{maj}.{min_v + 1}.0"
+    return f"{maj}.{min_v}.{pat + 1}"
+
+
+def get_thunderstore_safe_pack_name(target_mod: str, author_raw: str = "") -> str:
+    """
+    Extracts and sanitizes the Thunderstore `manifest.json` `"name"` field from `<Author>-<PackName>`.
+    Thunderstore strictly requires `"name"` to contain ONLY `a-z`, `A-Z`, `0-9`, and `_` (max 128 chars)
+    and NEVER include the version number or change across updates.
+    """
+    raw_pack_part = str(target_mod or "CustomProps").strip()
+    auth_clean = str(author_raw or "").strip()
+    auth_safe = re.sub(r"[^a-zA-Z0-9_]+", "_", auth_clean).strip("_")
+    if auth_clean and (
+        raw_pack_part.lower().startswith(f"{auth_clean.lower()}-")
+        or raw_pack_part.lower().startswith(f"{auth_clean.lower()}_")
+    ):
+        raw_pack_part = raw_pack_part[len(auth_clean) + 1 :]
+    elif auth_safe and (
+        raw_pack_part.lower().startswith(f"{auth_safe.lower()}-")
+        or raw_pack_part.lower().startswith(f"{auth_safe.lower()}_")
+    ):
+        raw_pack_part = raw_pack_part[len(auth_safe) + 1 :]
+    safe_pack = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_pack_part).strip("_")[:128] or "Custom_Props"
+    return safe_pack
+
+
+def get_existing_pack_version_info(context=None, target_mod: str | None = None) -> dict[str, str | None]:
+    """
+    Inspects disk (`Mods/<target_mod>/manifest.json`, `Staging/<target_mod>/manifest.json`,
+    `Staging/Packs/<target_mod>/compiled_prop_meta.json`, and any exported `<Author>-<SafePack>-*.zip`)
+    to find:
+      - `manifest_name`: existing locked `"name"` in `manifest.json` (if present and valid)
+      - `safe_pack`: Thunderstore-valid package name (`a-z`, `A-Z`, `0-9`, `_`)
+      - `highest_built_version`: highest version built in `manifest.json` / `compiled_prop_meta.json`
+      - `highest_zip_version`: highest version already exported as a Thunderstore `.zip` on disk
+    """
+    ctx = context if context is not None else bpy.context
+    resolved_mod = str(target_mod or get_resolved_target_mod_name(ctx)).strip()
+    author_raw = get_author_name(ctx) or "Author"
+    author_safe = re.sub(r"[^a-zA-Z0-9_]+", "_", author_raw).strip("_") or "Author"
+    safe_pack = get_thunderstore_safe_pack_name(resolved_mod, author_raw)
+
+    staging_dir = get_staging_dir(ctx)
+    game_dir = get_game_dir(ctx)
+    mods_dir = (game_dir / "Mods") if game_dir else None
+    pack_store = get_pack_storage_dir(resolved_mod, staging_dir)
+
+    manifest_name: str | None = None
+    built_versions: list[str] = []
+    zip_versions: list[str] = []
+
+    cand_manifests = []
+    if mods_dir:
+        cand_manifests.append(mods_dir / resolved_mod / "manifest.json")
+    if staging_dir:
+        cand_manifests.append(staging_dir / resolved_mod / "manifest.json")
+
+    for mf_p in cand_manifests:
+        if mf_p.is_file():
+            try:
+                m_data = json.loads(mf_p.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(m_data, dict):
+                    m_nm = str(m_data.get("name") or "").strip()
+                    if m_nm and re.fullmatch(r"[a-zA-Z0-9_]{1,128}", m_nm):
+                        if manifest_name is None:
+                            manifest_name = m_nm
+                    v_num = str(m_data.get("version_number") or "").strip()
+                    if v_num:
+                        built_versions.append(normalize_semver(v_num))
+            except Exception:
+                pass
+
+    for meta_p in (
+        pack_store / "compiled_prop_meta.json",
+        pack_store / "pack_registry.json",
+    ):
+        if meta_p.is_file():
+            try:
+                p_data = json.loads(meta_p.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(p_data, dict):
+                    pv = str(p_data.get("pack_version") or "").strip()
+                    if pv:
+                        built_versions.append(normalize_semver(pv))
+            except Exception:
+                pass
+
+    effective_pack = manifest_name if (manifest_name and manifest_name.lower() == safe_pack.lower()) else safe_pack
+    zip_dirs = [d for d in (mods_dir, staging_dir) if d is not None and d.is_dir()]
+    zip_prefixes = {
+        f"{author_safe.lower()}-{effective_pack.lower()}-",
+        f"{author_safe.lower()}-{safe_pack.lower()}-",
+    }
+    for z_dir in zip_dirs:
+        try:
+            for z_file in z_dir.glob("*.zip"):
+                zn_low = z_file.name.lower()
+                for pref in zip_prefixes:
+                    if zn_low.startswith(pref) and zn_low.endswith(".zip"):
+                        v_tail = z_file.name[len(pref) : -4].strip()
+                        if re.search(r"\d", v_tail):
+                            zip_versions.append(normalize_semver(v_tail))
+        except Exception:
+            pass
+
+    highest_built = max(built_versions, key=parse_semver_tuple) if built_versions else None
+    highest_zip = max(zip_versions, key=parse_semver_tuple) if zip_versions else None
+    return {
+        "manifest_name": manifest_name,
+        "safe_pack": effective_pack,
+        "highest_built_version": highest_built,
+        "highest_zip_version": highest_zip,
+    }
+
+
+def resolve_compile_pack_version(context=None, target_mod: str | None = None, prop=None) -> str:
+    """
+    Resolves and normalizes `pack_version` for compilation:
+      1. Normalizes `prop.pack_version` to strict `MAJOR.MINOR.PATCH` (`0.1.0`).
+      2. If a Thunderstore `.zip` for this pack was already exported at `highest_zip_version`
+         and `cur_ver <= highest_zip_version` (when `auto_bump_pack_version` is enabled),
+         advances to `bump_semver(highest_zip_version, "PATCH")` so a new compile never
+         reuses an already-released Thunderstore version.
+      3. Otherwise, if `highest_built_version` on disk is higher than `cur_ver` (e.g. user opened
+         a new `.blend` file that defaulted to `0.1.0` for an existing pack), syncs up to
+         `highest_built_version` so the pack version never regresses backwards.
+    """
+    ctx = context if context is not None else bpy.context
+    scn = ctx if isinstance(ctx, bpy.types.Scene) else (getattr(ctx, "scene", None) if ctx else getattr(bpy.context, "scene", None))
+    if prop is None and scn is not None:
+        prop = getattr(scn, "reskate_prop", None)
+    raw_ver = (getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0") or "0.1.0"
+    cur_ver = normalize_semver(raw_ver)
+    auto_bump = bool(getattr(prop, "auto_bump_pack_version", True)) if prop else True
+
+    try:
+        v_info = get_existing_pack_version_info(ctx, target_mod)
+        h_zip = v_info.get("highest_zip_version")
+        h_built = v_info.get("highest_built_version")
+        if h_zip and auto_bump and parse_semver_tuple(cur_ver) <= parse_semver_tuple(h_zip):
+            cur_ver = bump_semver(h_zip, "PATCH")
+        elif h_built and parse_semver_tuple(cur_ver) < parse_semver_tuple(h_built):
+            cur_ver = h_built
+    except Exception:
+        pass
+
+    if prop is not None:
+        try:
+            if getattr(prop, "pack_version", "") != cur_ver:
+                prop.pack_version = cur_ver
+        except Exception:
+            pass
+    return cur_ver
 
 
 def get_last_compiler_log_text(context=None) -> str:
@@ -9967,7 +10151,10 @@ def sync_queue_item_from_scene(context, item, batch_dir: Path | None = None, ski
 
 def get_pack_storage_dir(target_mod_name: str, staging_dir: Path | None = None) -> Path:
     """Returns the canonical staging pack registry directory (`<Staging>/Packs/<target_mod_name>`)."""
-    base = Path(staging_dir) if staging_dir else get_staging_dir()
+    if staging_dir is not None and isinstance(staging_dir, (str, Path)):
+        base = Path(staging_dir)
+    else:
+        base = get_staging_dir(staging_dir)
     resolved_mod = (target_mod_name or "").strip() or get_resolved_target_mod_name()
     return base / "Packs" / (resolved_mod or "CustomProps").strip()
 
@@ -11431,7 +11618,7 @@ def _build_single_prop_manifest_generator_impl(
     look_mode = (getattr(prop, "look_mode", "AS_IS") if prop else "AS_IS")
     albedo_tint = [float(v) for v in getattr(prop, "albedo_tint", (1.0, 1.0, 1.0))] if prop else [1.0, 1.0, 1.0]
     enable_custom_textures = (bool(getattr(prop, "enable_custom_textures", True)) if prop else True)
-    pack_version = (getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0").strip() or "0.1.0"
+    pack_version = resolve_compile_pack_version(context, target_mod, prop)
     pack_description = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
     include_2a = (getattr(prop, "include_2a_variant", False) if prop else False)
     export_fbmod_only = (getattr(prop, "export_fbmod_only", False) if prop else False)
@@ -11758,7 +11945,7 @@ def _build_pack_manifest_generator_impl(
 
     target_mod = get_resolved_target_mod_name(context, target_mod_override=target_mod_override)
     author_name = get_author_name(context) or (str(getattr(prop, "author_name", "") or "").strip() if prop else "") or "ReSkateAuthor"
-    pack_version = (getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0").strip() or "0.1.0"
+    pack_version = resolve_compile_pack_version(context, target_mod, prop)
     pack_description = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
     raw_mod_icon = str(getattr(prop, "mod_icon_path", "") or "").strip() if prop else ""
     mod_icon_path = str(Path(bpy.path.abspath(raw_mod_icon))) if raw_mod_icon else ""
