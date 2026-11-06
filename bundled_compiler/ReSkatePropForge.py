@@ -8,6 +8,7 @@ Blender 5.3 Beta Bridge, & Quick Drop Catalog Exporter.
 """
 
 import base64
+import copy
 import ctypes
 import hashlib
 import io
@@ -2996,11 +2997,10 @@ def build_patched_imc_ebx(imc_template: bytes, added_guid_pairs: list) -> bytes:
     struct.pack_into("<I", rebuilt_ebxd, 60, str2_off - 60)
 
     # 2. Rebuild EFIX
+    tpl_import_count = struct.unpack_from("<I", efix, 76)[0]
     struct.pack_into("<I", efix, 76, new_count)
     vanilla_imports_end = 80 + (vanilla_count * 32)
     new_imports = b"".join(fg + ig for fg, ig in deduped_pairs)
-
-    tpl_import_count = struct.unpack_from("<I", efix, 76)[0]
     noble_imports_end = 80 + (tpl_import_count * 32)
     noble_fixups_start = noble_imports_end + 4
     vanilla_fixups_end = noble_fixups_start + (1221 * 4)

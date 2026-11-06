@@ -227,9 +227,9 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.32.1"
+ADDON_VERSION = "0.32.2"
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.32.1"
+COMPILER_VERSION = "0.32.2"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"

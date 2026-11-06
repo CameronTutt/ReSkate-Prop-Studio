@@ -6,12 +6,12 @@ License: MIT / GPL-3.0-or-later (Open Source)
 
 from __future__ import annotations
 
-ADDON_VERSION = "0.32.1"
+ADDON_VERSION = "0.32.2"
 
 bl_info = {
     "name": "ReSkate Prop Studio",
     "author": "Crem",
-    "version": (0, 32, 1),
+    "version": (0, 32, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > ReSkate Prop",
     "description": "Open-Source Zero-Donor Skate. Prop Authoring, Havok Collision, Grind Visualizer, PBR/Cutout Shaders & Dynamic Lights for ReSkate",
