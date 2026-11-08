@@ -218,6 +218,10 @@ QUICK NOTE: the first time you compile a set of assets, it will take a bit of ti
 
 <img width="1927" height="834" alt="Group 14" src="https://github.com/user-attachments/assets/aa77140a-72cf-48d6-8ee7-5e7b550914af" />
 
+Additional Info - Courtesy of the ReSkate community
+<img width="667" height="128" alt="Screenshot 2026-11-08 at 3 17 56 PM" src="https://github.com/user-attachments/assets/653c0f52-4dd6-4ad3-bac7-05cddf5549fc" />
+
+
 
 ## 🔧 Quick Troubleshooting FAQ
 
