@@ -87,7 +87,7 @@ At the top of the **ReSkate Prop** panel, you will always see:
   - **`Select All in Pack (N)` (Right Button)**: Selects every prop in your `.blend` scene that belongs to the active Prop Pack in memory.
 
 
-- **`📏 Scale References` Twirl-Down**: Click **`Spawn Skater`**, **`Spawn Skateboard`**, **`Round Rail Pipe`**, or **`Spawn Ground Plane`** anytime to check your prop's real-world size (`1 Blender meter = 1 Game meter`). Scale references spawn right at your **3D Cursor** with their feet/wheels flush on the cursor's Z plane, and you can also use **`Set Prop Flush to Ground (Z = 0)`** on them directly!
+- **`📏 Scale References` Twirl-Down**: Click **`Spawn Skater`**, **`Spawn Skateboard`**, or **`Spawn Ground Plane`** anytime to check your prop's real-world size (`1 Blender meter = 1 Game meter`). Scale references spawn right at your **3D Cursor** with their feet/wheels flush on the cursor's Z plane, and you can also use **`Set Prop Flush to Ground (Z = 0)`** on them directly!
 
 <img width="1615" height="603" alt="Group 12" src="https://github.com/user-attachments/assets/a3409b09-5760-4f7f-98a4-aa1440ca7957" />
 
