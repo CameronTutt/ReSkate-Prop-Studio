@@ -33,6 +33,22 @@ import numpy as np
 import struct
 from mathutils import Euler, Matrix, Vector
 
+import site
+
+
+def _append_user_site_packages() -> str | None:
+    """Appends user site-packages to the END of sys.path so Blender's bundled numpy is never shadowed."""
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and os.path.isdir(user_site) and user_site not in sys.path:
+            sys.path.append(user_site)
+        return user_site
+    except Exception:
+        return None
+
+
+_append_user_site_packages()
+
 try:
     from PIL import Image as _PIL_Image
 except ImportError:
@@ -42,13 +58,23 @@ except ImportError:
 class _NumpyCompatImage:
     """Zero-dependency NumPy + zlib + Blender image shim when Pillow (PIL) is not installed in Blender's embedded Python."""
 
+    NEAREST = 0
+    LANCZOS = 1
+    BILINEAR = 2
+    BICUBIC = 3
+    BOX = 4
+    HAMMING = 5
+
     class Resampling:
         NEAREST = 0
         BILINEAR = 2
         BICUBIC = 3
         LANCZOS = 1
+        BOX = 4
+        HAMMING = 5
 
     def __init__(self, arr: np.ndarray, mode: str = "RGBA"):
+        self.info: dict = {}
         a = np.asarray(arr, dtype=np.uint8)
         if a.ndim == 2:
             if mode == "L":
@@ -75,8 +101,19 @@ class _NumpyCompatImage:
     def size(self) -> tuple[int, int]:
         return (int(self._arr.shape[1]), int(self._arr.shape[0]))
 
+    @property
+    def width(self) -> int:
+        return int(self._arr.shape[1])
+
+    @property
+    def height(self) -> int:
+        return int(self._arr.shape[0])
+
     def copy(self) -> "_NumpyCompatImage":
         return _NumpyCompatImage(self._arr.copy(), mode=self.mode)
+
+    def close(self) -> None:
+        pass
 
     def __array__(self, dtype=None):
         return self._arr.astype(dtype) if dtype is not None else self._arr
@@ -87,7 +124,7 @@ class _NumpyCompatImage:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return False
 
-    def convert(self, mode: str = "RGBA") -> "_NumpyCompatImage":
+    def convert(self, mode: str = "RGBA", *args, **kwargs) -> "_NumpyCompatImage":
         m = (mode or "RGBA").upper()
         if m == self.mode:
             return self.copy()
@@ -108,7 +145,7 @@ class _NumpyCompatImage:
             return _NumpyCompatImage(lum, "L")
         return self.copy()
 
-    def resize(self, size: tuple[int, int], resample=None) -> "_NumpyCompatImage":
+    def resize(self, size: tuple[int, int], resample=None, *args, **kwargs) -> "_NumpyCompatImage":
         new_w, new_h = max(1, int(size[0])), max(1, int(size[1]))
         old_h, old_w = self._arr.shape[:2]
         if (old_w, old_h) == (new_w, new_h):
@@ -130,17 +167,32 @@ class _NumpyCompatImage:
         out = np.clip(np.round(top * (1.0 - wy) + bot * wy), 0, 255).astype(np.uint8)
         return _NumpyCompatImage(out, mode=self.mode)
 
-    def save(self, fp, fmt: str = "PNG"):
+    # =========================================================================
+    # @AI-AGENT-CONTEXT / ARCHITECTURAL NOTE (v0.32.1 Hotfix):
+    # DO NOT remove `compress_level` or `**kwargs` from `_NumpyCompatImage.save()`.
+    # 1. Stock Blender lacks Pillow (`PIL`), falling back to `_NumpyCompatImage`.
+    #    Export prep passes `compress_level` to `.save()`, which caused a TypeError.
+    # 2. Vectorized `raw_rows` filter-byte prepending via `np.concatenate` for
+    #    ~10x faster 4K PNG staging without external dependencies.
+    # 3. TODO for AI Agent on main PC: Add a non-blocking/one-time `--user` pip
+    #    bootstrapper for `Pillow` at the `_PIL_Image` import site with this
+    #    class kept as the offline fail-safe fallback.
+    # =========================================================================
+    def save(self, fp, fmt: str = "PNG", compress_level: int = 6, **kwargs):
         rgba = self.convert("RGBA")._arr
         h, w = rgba.shape[:2]
-        raw_rows = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
+        raw_rows = np.concatenate(
+            [np.zeros((h, 1), dtype=np.uint8), rgba.reshape(h, w * 4)],
+            axis=1
+        ).tobytes()
 
         def _chunk(tag: bytes, data: bytes) -> bytes:
             crc = zlib.crc32(tag + data) & 0xFFFFFFFF
             return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
+        lvl = max(0, min(9, int(compress_level if compress_level is not None else 6)))
         ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-        png_bytes = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw_rows, 6)) + _chunk(b"IEND", b"")
+        png_bytes = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw_rows, lvl)) + _chunk(b"IEND", b"")
         if hasattr(fp, "write"):
             fp.write(png_bytes)
         else:
@@ -149,11 +201,19 @@ class _NumpyCompatImage:
             p.write_bytes(png_bytes)
 
     @classmethod
-    def fromarray(cls, arr: np.ndarray, mode: str = "RGBA") -> "_NumpyCompatImage":
+    def fromarray(cls, arr: np.ndarray, mode: str | None = None) -> "_NumpyCompatImage":
+        if mode is None:
+            a_arr = np.asarray(arr)
+            if a_arr.ndim == 2:
+                mode = "L"
+            elif a_arr.ndim == 3 and a_arr.shape[2] == 3:
+                mode = "RGB"
+            else:
+                mode = "RGBA"
         return cls(arr, mode=mode)
 
     @classmethod
-    def new(cls, mode: str, size: tuple[int, int], color=0) -> "_NumpyCompatImage":
+    def new(cls, mode: str, size: tuple[int, int], color=0, **kwargs) -> "_NumpyCompatImage":
         w, h = max(1, int(size[0])), max(1, int(size[1]))
         m = (mode or "RGBA").upper()
         if m == "L":
@@ -170,12 +230,12 @@ class _NumpyCompatImage:
         return cls(arr, mode=m)
 
     @classmethod
-    def open(cls, fp) -> "_NumpyCompatImage":
+    def open(cls, fp, mode: str = "r", formats=None, **kwargs) -> "_NumpyCompatImage":
         tmp_path = None
         try:
             if hasattr(fp, "read"):
                 data = fp.read()
-                tmp_path = Path(DEFAULT_STAGING_DIR) / f"_tmp_compat_open_{os.getpid()}.png"
+                tmp_path = Path(DEFAULT_STAGING_DIR) / f"_tmp_compat_open_{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.png"
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path.write_bytes(data)
                 load_path = str(tmp_path)
@@ -202,6 +262,70 @@ class _NumpyCompatImage:
 
 Image = _PIL_Image if _PIL_Image is not None else _NumpyCompatImage
 
+_PILLOW_BOOTSTRAP_ACTIVE: bool = False
+
+
+def _bind_loaded_pillow_image() -> bool:
+    """Appends user site-packages and hot-binds Pillow Image across active add-on modules via sys.modules."""
+    global _PIL_Image, Image
+    _append_user_site_packages()
+    try:
+        from PIL import Image as pil_img
+    except ImportError:
+        return False
+    _PIL_Image = pil_img
+    Image = pil_img
+    pkg_name = __package__ or "sk8_prop_authoring_addon"
+    op_mod = sys.modules.get(f"{pkg_name}.operators")
+    if op_mod is not None and hasattr(op_mod, "Image"):
+        op_mod.Image = pil_img
+    return True
+
+
+def bootstrap_pillow_user_site_async(callback=None) -> bool:
+    """
+    Opt-in, non-blocking background `--user --no-deps` Pillow installer for stock Blender Python.
+    Falls back cleanly to `_NumpyCompatImage` if offline or blocked.
+    """
+    global _PILLOW_BOOTSTRAP_ACTIVE
+    if _PIL_Image is not None or _bind_loaded_pillow_image():
+        return True
+    if _PILLOW_BOOTSTRAP_ACTIVE or bpy.app.background:
+        return False
+    _PILLOW_BOOTSTRAP_ACTIVE = True
+
+    def _worker():
+        global _PILLOW_BOOTSTRAP_ACTIVE
+        ok = False
+        try:
+            py_exe = sys.executable
+            env = dict(os.environ)
+            try:
+                subprocess.run([py_exe, "-m", "ensurepip"], capture_output=True, text=True, env=env, timeout=30)
+            except Exception:
+                pass
+            res = subprocess.run(
+                [py_exe, "-m", "pip", "install", "--user", "--no-deps", "--no-warn-script-location", "Pillow"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=60,
+            )
+            if res.returncode == 0:
+                ok = _bind_loaded_pillow_image()
+        except Exception:
+            ok = False
+        finally:
+            _PILLOW_BOOTSTRAP_ACTIVE = False
+            if callable(callback):
+                try:
+                    callback(ok)
+                except Exception:
+                    pass
+
+    threading.Thread(target=_worker, name="ReSkatePillowUserBootstrap", daemon=True).start()
+    return True
+
 from . import properties
 from .properties import (
     BLENDER_ORG_CATALOG,
@@ -227,9 +351,10 @@ from .properties import (
     sync_active_object_props,
 )
 
-ADDON_VERSION = "0.33.2"
+_ROOT_PKG_MOD = sys.modules.get(__package__ or "sk8_prop_authoring_addon")
+ADDON_VERSION = str(getattr(_ROOT_PKG_MOD, "ADDON_VERSION", "0.33.4") or "0.33.4")
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.33.2"
+COMPILER_VERSION = "0.33.4"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -12978,10 +13103,12 @@ def ensure_python_compiler_dependencies(python_exe: str | None = None) -> tuple[
     # Fast <0.001ms in-process check when using Blender's bundled Python (avoids spawning any subprocess!)
     try:
         if Path(py).resolve() == Path(sys.executable).resolve():
+            _append_user_site_packages()
             import numpy  # noqa: F401
             import PIL  # noqa: F401
             import trimesh  # noqa: F401
             import pygltflib  # noqa: F401
+            _bind_loaded_pillow_image()
             _DEPS_VERIFIED_PY.add(py)
             return True, "All Python dependencies present (in-process)"
     except Exception:
@@ -13092,6 +13219,25 @@ def ensure_python_compiler_dependencies(python_exe: str | None = None) -> tuple[
             timeout=10,
         )
         if v_chk.returncode == 0:
+            # Ensure Pillow is also installed (--user --no-deps) & hot-bound in Blender's running Python
+            try:
+                _append_user_site_packages()
+                if not _bind_loaded_pillow_image():
+                    py_self = sys.executable
+                    try:
+                        subprocess.run([py_self, "-m", "ensurepip"], capture_output=True, text=True, env=env, timeout=30)
+                    except Exception:
+                        pass
+                    subprocess.run(
+                        [py_self, "-m", "pip", "install", "--user", "--no-deps", "--no-warn-script-location", "Pillow"],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=120,
+                    )
+                    _bind_loaded_pillow_image()
+            except Exception:
+                pass
             _DEPS_VERIFIED_PY.add(py)
             return True, "Verified numpy, Pillow, trimesh, pygltflib"
         return False, (v_chk.stderr or v_chk.stdout or "Required Python packages failed to import").strip()

@@ -40,6 +40,8 @@ except ImportError:
     Image = None
 
 from . import compiler_bridge
+if Image is None:
+    Image = compiler_bridge.Image
 from . import gpu_draw
 from . import properties
 from . import scale_reference_meshes as scale_refs
@@ -8469,8 +8471,8 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
                 p_icon = Path(bpy.path.abspath(custom_mod_icon))
                 if p_icon.exists() and p_icon.is_file():
                     import io as _io
-                    from PIL import Image
-                    im = Image.open(p_icon).convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS)
+                    img_mod = compiler_bridge.Image
+                    im = img_mod.open(p_icon).convert("RGBA").resize((256, 256), img_mod.Resampling.LANCZOS)
                     buf = _io.BytesIO()
                     im.save(buf, "PNG")
                     icon_bytes = buf.getvalue()
@@ -8479,8 +8481,8 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         if icon_bytes is None and (compiled_mod_dir / "icon.png").exists():
             try:
                 import io as _io
-                from PIL import Image
-                im = Image.open(compiled_mod_dir / "icon.png").convert("RGBA").resize((256, 256), Image.Resampling.LANCZOS)
+                img_mod = compiler_bridge.Image
+                im = img_mod.open(compiled_mod_dir / "icon.png").convert("RGBA").resize((256, 256), img_mod.Resampling.LANCZOS)
                 buf = _io.BytesIO()
                 im.save(buf, "PNG")
                 icon_bytes = buf.getvalue()
@@ -8499,8 +8501,8 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         if icon_bytes is None:
             try:
                 import io as _io
-                from PIL import Image
-                im = Image.new("RGBA", (256, 256), (36, 42, 54, 255))
+                img_mod = compiler_bridge.Image
+                im = img_mod.new("RGBA", (256, 256), (36, 42, 54, 255))
                 buf = _io.BytesIO()
                 im.save(buf, "PNG")
                 icon_bytes = buf.getvalue()
@@ -12569,6 +12571,7 @@ def _perform_live_addon_reload_and_restore(snapshot: dict, new_ver_str: str) -> 
     re-registers the add-on, and restores the full scene & preferences snapshot.
     """
     import importlib
+    importlib.invalidate_caches()
     pkg_name = __package__ or "sk8_prop_authoring_addon"
     root_mod = sys.modules.get(pkg_name)
     try:
@@ -12605,6 +12608,11 @@ def _perform_live_addon_reload_and_restore(snapshot: dict, new_ver_str: str) -> 
                 root_mod.register()
         except Exception:
             pass
+    try:
+        import addon_utils
+        addon_utils.modules_refresh()
+    except Exception:
+        pass
 
     cb_mod = sys.modules.get(f"{pkg_name}.compiler_bridge") or compiler_bridge
     pr_mod = sys.modules.get(f"{pkg_name}.properties") or properties
@@ -12742,6 +12750,8 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                 extracted_addon_dir = extract_root
             else:
                 for cand_init in extract_root.rglob("__init__.py"):
+                    if "__MACOSX" in cand_init.parts or cand_init.name.startswith("._"):
+                        continue
                     if (cand_init.parent / "compiler_bridge.py").is_file():
                         extracted_addon_dir = cand_init.parent
                         break
@@ -12753,6 +12763,8 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
 
             try:
                 for py_f in extracted_addon_dir.glob("*.py"):
+                    if py_f.name.startswith("._"):
+                        continue
                     raw_b = py_f.read_bytes()
                     if b"\x00" in raw_b:
                         raise ValueError(f"Null bytes found in {py_f.name}")
@@ -12786,6 +12798,21 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                     cand_dirs.append(sys_scripts / "addons" / "sk8_prop_authoring_addon")
             except Exception:
                 pass
+            try:
+                import addon_utils
+                for ap in addon_utils.paths():
+                    if ap:
+                        cand_dirs.append(Path(ap) / "sk8_prop_authoring_addon")
+            except Exception:
+                pass
+            try:
+                ext_root = Path(bpy.utils.user_resource('EXTENSIONS'))
+                if ext_root and ext_root.is_dir():
+                    for repo_sub in ext_root.iterdir():
+                        if repo_sub.is_dir():
+                            cand_dirs.append(repo_sub / "sk8_prop_authoring_addon")
+            except Exception:
+                pass
             studio_p = compiler_bridge.get_studio_dir(context)
             if studio_p and studio_p.is_dir():
                 cand_dirs.append(studio_p / "Native" / "Blender" / "sk8_prop_authoring_addon")
@@ -12814,11 +12841,16 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
 
                 for t_dir in target_addon_dirs:
                     for item in extracted_addon_dir.iterdir():
-                        if item.name == "__pycache__":
+                        if item.name in ("__pycache__", "__MACOSX", ".DS_Store") or item.name.startswith("._"):
                             continue
                         dest_item = t_dir / item.name
                         if item.is_dir():
-                            shutil.copytree(item, dest_item, dirs_exist_ok=True)
+                            shutil.copytree(
+                                item,
+                                dest_item,
+                                dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("__pycache__", "__MACOSX", ".DS_Store", "._*"),
+                            )
                         elif item.is_file():
                             dest_item.write_bytes(item.read_bytes())
                     pycache_dir = t_dir / "__pycache__"
