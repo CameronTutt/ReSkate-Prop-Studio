@@ -1,7 +1,7 @@
 
 # 🛹 ReSkate QuickDrop Studio (`v1.0.0`)
 
-<img width="2350" height="1597" alt="Group 172" src="https://github.com/user-attachments/assets/b3d0d0d6-31c3-4db3-9dcf-ac1847d5fe97" />
+<img width="2350" height="1615" alt="quickdropstudio" src="https://github.com/user-attachments/assets/66eb13e8-ae1b-4d81-a43b-99ab6e08bc8d" />
 
 
 
