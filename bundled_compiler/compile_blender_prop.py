@@ -6821,10 +6821,11 @@ def compile_blender_props_package(
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 readme_src_str = str(meta.get("mod_readme_path") or "").strip()
-                footer_md = "\n---\n*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*\n"
+                footer_md = "\n---\n*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-QuickDrop-Studio)*\n"
                 if readme_src_str and Path(readme_src_str).is_file():
                     raw_rm = Path(readme_src_str).read_text(encoding="utf-8", errors="replace").rstrip()
-                    if "github.com/camerontutt/reskate-prop-studio" not in raw_rm.lower():
+                    low_rm = raw_rm.lower()
+                    if "github.com/camerontutt/reskate-quickdrop-studio" not in low_rm and "github.com/camerontutt/reskate-prop-studio" not in low_rm:
                         raw_rm = f"{raw_rm}\n{footer_md}"
                     else:
                         raw_rm = raw_rm + "\n"
@@ -6859,7 +6860,7 @@ def compile_blender_props_package(
                     "2. Launch Skate. and open the Quick Drop Object Browser.",
                     "",
                     "---",
-                    "*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*",
+                    "*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-QuickDrop-Studio)*",
                     "",
                 ])
                 (dest_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")

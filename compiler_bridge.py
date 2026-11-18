@@ -372,8 +372,13 @@ ADDON_VERSION = str(getattr(_ROOT_PKG_MOD, "ADDON_VERSION", "1.0.0") or "1.0.0")
 ADDON_VERSION_STR = ADDON_VERSION
 COMPILER_VERSION = "1.0.0"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
-GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
-GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
+GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio"
+GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-QuickDrop-Studio/releases/latest"
+GITHUB_RELEASES_API_FALLBACK_URLS = (
+    GITHUB_RELEASES_API_URL,
+    "https://api.github.com/repositories/1431517622/releases/latest",
+    "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest",
+)
 
 # Once-per-session non-blocking background GitHub update check state
 _SESSION_UPDATE_CHECK_STARTED: bool = False
@@ -424,16 +429,39 @@ def extract_release_zip_asset_url(payload: dict) -> str:
     return f"{GITHUB_REPO_URL}/releases/latest/download/reskate_quickdrop_studio_addon.zip"
 
 
+def fetch_latest_github_release_payload(timeout: float = 4.0, user_agent: str | None = None) -> dict:
+    """
+    Fetches the latest GitHub Release JSON payload across canonical, immutable numeric repo ID
+    (1431517622), and legacy repository API endpoints so repo renames never break updates.
+    """
+    import urllib.request
+    ua = str(user_agent or f"ReSkateQuickDropStudio/{ADDON_VERSION_STR}")
+    headers = {"User-Agent": ua, "Accept": "application/vnd.github+json"}
+    last_exc = None
+    seen: set[str] = set()
+    urls = [GITHUB_RELEASES_API_URL, *GITHUB_RELEASES_API_FALLBACK_URLS]
+    for url in urls:
+        u = str(url or "").strip()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        try:
+            req = urllib.request.Request(u, headers=headers)
+            with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if isinstance(data, dict) and data.get("tag_name"):
+                return data
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No valid release payload returned from GitHub API endpoints.")
+
+
 def _background_session_update_worker() -> None:
     global _SESSION_UPDATE_AVAILABLE_TAG, _SESSION_UPDATE_HTML_URL, _SESSION_UPDATE_ZIP_URL
     try:
-        import urllib.request
-        req = urllib.request.Request(
-            GITHUB_RELEASES_API_URL,
-            headers={"User-Agent": f"ReSkateQuickDropStudio/{ADDON_VERSION_STR}", "Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        payload = fetch_latest_github_release_payload(timeout=3.5)
         tag_name = str(payload.get("tag_name") or "").strip().lstrip("vV")
         html_url = str(payload.get("html_url") or f"{GITHUB_REPO_URL}/releases/latest")
         zip_url = extract_release_zip_asset_url(payload)
@@ -11852,7 +11880,8 @@ PACK_README_ATTRIBUTION_FOOTER = (
 def ensure_pack_readme_footer(readme_text: str) -> str:
     """Appends the 'Created with ReSkate QuickDrop Studio' GitHub attribution footer if not already present."""
     base = str(readme_text or "").rstrip()
-    if "github.com/camerontutt/reskate-prop-studio" in base.lower():
+    low = base.lower()
+    if "github.com/camerontutt/reskate-quickdrop-studio" in low or "github.com/camerontutt/reskate-prop-studio" in low:
         return base + "\n"
     if not base:
         return PACK_README_ATTRIBUTION_FOOTER.lstrip("\n")

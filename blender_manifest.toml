@@ -6,7 +6,7 @@ name = "ReSkate QuickDrop Studio"
 tagline = "Open-Source Zero-Donor Skate. Quick Drop Object (QDO) Authoring & Compiler Suite"
 maintainer = "Crem"
 type = "add-on"
-website = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
+website = "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio"
 
 tags = [
   "3D View",

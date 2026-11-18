@@ -31,8 +31,8 @@ from bpy.props import (
 # Persistent User Paths (Game Folder, ReSkate Studio Folder, Staging Folder)
 # ---------------------------------------------------------------------------
 
-GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
-GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
+GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio"
+GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-QuickDrop-Studio/releases/latest"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 
 

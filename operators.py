@@ -12501,29 +12501,21 @@ class RESKATE_OT_copy_compiler_log(bpy.types.Operator):
 
 
 class RESKATE_OT_check_for_updates(bpy.types.Operator):
-    """Checks GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio) for a newer version of ReSkate QuickDrop Studio"""
+    """Checks GitHub Releases (https://github.com/CameronTutt/ReSkate-QuickDrop-Studio) for a newer version of ReSkate QuickDrop Studio"""
     bl_idname = "reskate.check_for_updates"
     bl_label = "Check for Updates"
-    bl_description = "Queries GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio/releases) to check if a newer version of ReSkate QuickDrop Studio is available"
+    bl_description = "Queries GitHub Releases (https://github.com/CameronTutt/ReSkate-QuickDrop-Studio/releases) to check if a newer version of ReSkate QuickDrop Studio is available"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
-        import urllib.request
         prefs = get_addon_preferences(context)
         current_ver = compiler_bridge.ADDON_VERSION_STR
-        repo_url = getattr(compiler_bridge, "GITHUB_REPO_URL", "https://github.com/CameronTutt/ReSkate-Prop-Studio")
-        api_url = getattr(
-            compiler_bridge,
-            "GITHUB_RELEASES_API_URL",
-            "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest",
-        )
+        repo_url = getattr(compiler_bridge, "GITHUB_REPO_URL", "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio")
         try:
-            req = urllib.request.Request(
-                api_url,
-                headers={"User-Agent": f"ReSkateQuickDropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
+            payload = compiler_bridge.fetch_latest_github_release_payload(
+                timeout=4.0,
+                user_agent=f"ReSkateQuickDropStudio/{current_ver}",
             )
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
             tag_name = str(payload.get("tag_name") or "").strip().lstrip("vV")
             html_url = str(payload.get("html_url") or f"{repo_url}/releases/latest")
             if not tag_name:
@@ -12702,11 +12694,6 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
 
         test_zip_override = os.environ.get("RESKATE_TEST_UPDATE_ZIP_PATH", "").strip()
         current_ver = compiler_bridge.ADDON_VERSION_STR
-        api_url = getattr(
-            compiler_bridge,
-            "GITHUB_RELEASES_API_URL",
-            "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest",
-        )
         zip_url = str(getattr(compiler_bridge, "_SESSION_UPDATE_ZIP_URL", "") or "").strip()
         target_tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "").strip()
 
@@ -12720,12 +12707,10 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                     shutil.copy2(test_zip_override, tmp_zip)
                 else:
                     if not zip_url:
-                        req_meta = urllib.request.Request(
-                            api_url,
-                            headers={"User-Agent": f"ReSkateQuickDropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
+                        payload = compiler_bridge.fetch_latest_github_release_payload(
+                            timeout=10.0,
+                            user_agent=f"ReSkateQuickDropStudio/{current_ver}",
                         )
-                        with urllib.request.urlopen(req_meta, timeout=10.0) as resp:
-                            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
                         target_tag = str(payload.get("tag_name") or "").strip().lstrip("vV") or target_tag
                         zip_url = compiler_bridge.extract_release_zip_asset_url(payload)
 

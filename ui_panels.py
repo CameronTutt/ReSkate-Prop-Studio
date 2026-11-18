@@ -2500,7 +2500,7 @@ def _draw_session_update_banner(layout):
         cur_ver = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "1.0.0") or "1.0.0")
         rel_url = str(
             getattr(compiler_bridge, "_SESSION_UPDATE_HTML_URL", "")
-            or "https://github.com/CameronTutt/ReSkate-Prop-Studio/releases/latest"
+            or "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio/releases/latest"
         )
         upd_box = layout.box()
         top_row = upd_box.row(align=True)

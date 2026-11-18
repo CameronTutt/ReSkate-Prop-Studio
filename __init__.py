@@ -15,7 +15,7 @@ bl_info = {
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > ReSkate QuickDrop",
     "description": "Open-Source Zero-Donor Skate. Quick Drop Object (QDO) Authoring, 1:1 Havok Skate & Grind Physics, PBR/Cutout Shaders & Dynamic Lights for ReSkate",
-    "doc_url": "https://github.com/CameronTutt/ReSkate-Prop-Studio",
+    "doc_url": "https://github.com/CameronTutt/ReSkate-QuickDrop-Studio",
     "category": "3D View",
 }
 
