@@ -1,5 +1,5 @@
 """
-ReSkate Prop Studio — gpu_draw.py
+ReSkate QuickDrop Studio — gpu_draw.py
 3D Viewport GPU shader overlay for vertex grind paths, marked grind edges
 (color-coordinated by Ledge / Round Rail / Coping + optional 3D Box & Cylinder shape overlays),
 and collision geometry (including Simple Hulls and custom collision objects).

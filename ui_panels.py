@@ -1,5 +1,5 @@
 """
-ReSkate Prop Studio — UI Panels (ui_panels.py)
+ReSkate QuickDrop Studio — UI Panels (ui_panels.py)
 Implements the 3-Mode UI Architecture (Simple | Advanced | Experimental) on top of the
 complete 7-Step Checklist UX:
   1. Setup → 2. Collision & Grind → 3. Shaders, Sound & Look → 4. Light (in-game) → 5. Thumbnail → 6. Ship
@@ -221,7 +221,7 @@ def get_sanctus_carousel_enum_items(prop_self, context) -> list[tuple]:
 
 
 def _is_advanced_lab_addon_enabled(context=None) -> bool:
-    """Returns True when the second add-on ('ReSkate Prop Studio — Advanced & Lab') is enabled."""
+    """Returns True when the second add-on ('ReSkate QuickDrop Studio — Advanced & Lab') is enabled."""
     if getattr(bpy.types, "RESKATE_PT_lab_panel", None) is not None:
         return True
     ctx = context or bpy.context
@@ -391,7 +391,7 @@ class RESKATE_PT_base:
     """Base mixin defining N-panel tab location and layout category."""
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'ReSkate Prop'
+    bl_category = 'ReSkate QuickDrop'
 
 
 # ============================================================================
@@ -462,6 +462,12 @@ def get_active_mesh_metrics(context):
         return cached
 
     tri_count = _fast_mesh_tri_count(mesh)
+    area_m2, tris_per_m2 = (1.0, 0.0)
+    if hasattr(compiler_bridge, "compute_object_surface_area_and_density"):
+        try:
+            area_m2, tris_per_m2 = compiler_bridge.compute_object_surface_area_and_density(obj, tri_count)
+        except Exception:
+            area_m2, tris_per_m2 = (1.0, 0.0)
 
     res = {
         "obj": obj,
@@ -471,6 +477,8 @@ def get_active_mesh_metrics(context):
         "polys": poly_count,
         "verts": vert_count,
         "tris": tri_count,
+        "area_m2": area_m2,
+        "tris_per_m2": tris_per_m2,
         "origin_flush": origin_flush,
     }
     if len(_METRICS_CACHE) > 32:
@@ -607,10 +615,13 @@ def evaluate_all_step_statuses(context) -> dict[str, tuple[str, str]]:
             s2 = ("✅", f"Simple hulls (up to {hulls} shapes)")
     else:
         h_stat = compiler_bridge.get_havok_ceiling_status(context, obj) if hasattr(compiler_bridge, "get_havok_ceiling_status") else {}
-        if h_stat.get("exceeds_ceiling"):
-            s2 = ("⚠️", f"Havok ceiling exceeded ({h_stat['welded_verts']:,}v / {h_stat['tris']:,}t > 2,600 / 5,000)")
+        if h_stat.get("exceeds_verts"):
+            s2 = ("⚠️", f"Visual mesh vertex limit ({h_stat['welded_verts']:,} > 65,535) — simplify")
+        elif h_stat.get("high_tris") or h_stat.get("high_density"):
+            d_val = int(round(float(h_stat.get("tris_per_m2", 0.0))))
+            s2 = ("⚠️", f"Heavy 1:1 collision ({h_stat['tris']:,} tris, ~{d_val:,}/m²) — may lag")
         elif tris > max_col:
-            s2 = ("⚠️", f"Collision is {tris:,} tris, consider simplifying")
+            s2 = ("⚠️", f"Collision is {tris:,} tris (> {max_col:,} cap), will simplify")
         else:
             s2 = ("✅", f"1:1 Mesh + 8-Hull Placement ({tris:,} tris)")
 
@@ -618,8 +629,8 @@ def evaluate_all_step_statuses(context) -> dict[str, tuple[str, str]]:
     h_stat = compiler_bridge.get_havok_ceiling_status(context, obj) if hasattr(compiler_bridge, "get_havok_ceiling_status") else {}
     if col_mode in ("NO_COLLISION", "NONE", "DECAL_ONLY"):
         s3 = ("✅", "N/A (No skater collision)")
-    elif h_stat.get("exceeds_ceiling") and (n_paths > 0 or n_auto > 0):
-        s3 = ("⚠️", f"Grind edges not 1:1 (Havok ceiling exceeded: {h_stat['welded_verts']:,}v)")
+    elif h_stat.get("exceeds_verts") and (n_paths > 0 or n_auto > 0):
+        s3 = ("⚠️", f"Mesh exceeds 65,535 verts ({h_stat['welded_verts']:,}v) — simplify or use _COL")
     elif n_paths > 0 and n_auto > 0:
         s3 = ("✅", f"{n_paths} grind path(s) + {n_auto} marked edges")
     elif n_paths > 0:
@@ -912,29 +923,58 @@ def _draw_havok_ceiling_warning(layout, context, obj, source_panel: str = "") ->
 
     welded_v = int(status.get("welded_verts", 0))
     tris = int(status.get("tris", 0))
-    max_v = int(status.get("max_verts", 2600))
-    max_t = int(status.get("max_tris", 5000))
+    d_val = int(round(float(status.get("tris_per_m2", 0.0))))
+    exceeds_verts = bool(status.get("exceeds_verts", False))
+    high_tris = bool(status.get("high_tris", False))
+    high_density = bool(status.get("high_density", False))
 
     box = layout.box()
     box.alert = True
 
     h_row = box.row(align=True)
-    h_row.label(
-        text=f"⚠️ Havok 1:1 Ceiling Exceeded: {welded_v:,} verts / {tris:,} tris (Max {max_v:,} / {max_t:,})",
-        icon='ERROR',
-    )
+    if exceeds_verts:
+        h_row.label(
+            text=f"⚠️ Visual Vertex Limit Exceeded: {welded_v:,} verts (Max 65,535)",
+            icon='ERROR',
+        )
+    elif high_tris and high_density:
+        h_row.label(
+            text=f"⚠️ Heavy & Dense Collision: {tris:,} tris (>25,000) | ~{d_val:,} tris/m²",
+            icon='ERROR',
+        )
+    elif high_tris:
+        h_row.label(
+            text=f"⚠️ High Collision Triangle Count: {tris:,} tris (> 25,000 recommended)",
+            icon='ERROR',
+        )
+    else:
+        h_row.label(
+            text=f"⚠️ Dense Micro-Triangles: ~{d_val:,} tris/m² ({tris:,} tris > 1,000/m²)",
+            icon='ERROR',
+        )
 
     col = box.column(align=True)
     col.scale_y = 0.90
-    col.label(
-        text="Mesh will be auto-decimated at compile time. In-game grind edges may not match visible geometry 1:1!",
-        icon='INFO',
-    )
+    if exceeds_verts:
+        col.label(
+            text="Visual meshes cap at 65,535 vertices in Frostbite — decimate or split.",
+            icon='INFO',
+        )
+    elif high_density:
+        col.label(
+            text="Compiles 1:1, but tightly packed small triangles can slow skater trajectory prediction.",
+            icon='INFO',
+        )
+    else:
+        col.label(
+            text="Compiles 1:1 undecimated (up to 100K), but >25K tris may cause skater lag.",
+            icon='INFO',
+        )
 
     if source_panel == "collision":
-        col.label(text="• Authoring an explicit simplified mesh ensures predictable physical collision & crisp grind edges.")
+        col.label(text="• Scale up, use Simple Hulls, or generate a simplified _COL mesh if you notice lag.")
     elif source_panel == "ship":
-        col.label(text="• High vertex count will trigger Frostbite's automatic decimation during packaging.")
+        col.label(text="• Consider generating a simplified _COL mesh or Simple Hulls for smoother performance.")
 
     btn_col = box.column(align=True)
     btn_col.scale_y = 1.2
@@ -1223,14 +1263,27 @@ def _draw_simple_page2_collision(layout, context, prop, obj, metrics):
 
     if col_mode in ("SAME_AS_MESH", "EXACT_MESH", "EXACT_1_1") and metrics is not None:
         tris = metrics["tris"]
+        verts = metrics["verts"]
+        d_val = int(round(float(metrics.get("tris_per_m2", 0.0))))
         sum_box.label(
-            text=f"✅ 1:1 Visible Mesh Collision Active ({tris:,} triangles)",
+            text=f"✅ 1:1 Visible Mesh Collision Active ({tris:,} tris, ~{d_val:,} tris/m²)",
             icon='CHECKMARK',
         )
-        if tris > 8000:
+        if verts > 65535:
             w_row = sum_box.row(align=True)
             w_row.alert = True
-            w_row.label(text=f"Too many triangles ({tris:,} > 8,000) — switch to Simple Hulls or simplify.", icon='ERROR')
+            w_row.label(text=f"Visual mesh exceeds 65,535 vertices ({verts:,}) — simplify or use Custom Collision (_COL).", icon='ERROR')
+        if tris > 25000:
+            w_row = sum_box.row(align=True)
+            w_row.alert = True
+            w_row.label(text=f"High Triangle Count ({tris:,} > 25,000): Compiles 1:1, but may cause skater prediction lag.", icon='ERROR')
+        if tris > 5000 and float(metrics.get("tris_per_m2", 0.0)) > 1000.0:
+            w_row = sum_box.row(align=True)
+            w_row.alert = True
+            w_row.label(
+                text=f"Dense Micro-Triangles (~{d_val:,} tris/m²): Tightly packed faces can slow prediction — scale up, simplify, or use Simple Hulls.",
+                icon='ERROR',
+            )
     elif isinstance(parsed_sum, dict):
         sh_cnt = int(parsed_sum.get("shape_count", 1))
         tr_cnt = int(parsed_sum.get("triangle_count", 0))
@@ -1256,6 +1309,19 @@ def _draw_simple_page2_collision(layout, context, prop, obj, metrics):
         tris = metrics["tris"]
         if col_mode == "NO_COLLISION":
             sum_box.label(text="✅ No Skater Collision Active (Prop is placement-only)", icon='CHECKMARK')
+        elif col_mode in ("CUSTOM_OBJECT", "AUTHORED_COL", "CUSTOM_COL") and hasattr(compiler_bridge, "get_havok_ceiling_status"):
+            h_stat = compiler_bridge.get_havok_ceiling_status(context, obj)
+            c_tris = int(h_stat.get("tris", tris))
+            c_dens = int(round(float(h_stat.get("tris_per_m2", 0.0))))
+            sum_box.label(text=f"Custom Collision: {c_tris:,} tris, ~{c_dens:,} tris/m² (Click 'Check Collision' to preview)", icon='INFO')
+            if h_stat.get("high_tris"):
+                w_row = sum_box.row(align=True)
+                w_row.alert = True
+                w_row.label(text=f"High Triangle Count ({c_tris:,} > 25,000): Compiles 1:1, but may cause skater prediction lag.", icon='ERROR')
+            if h_stat.get("high_density"):
+                w_row = sum_box.row(align=True)
+                w_row.alert = True
+                w_row.label(text=f"Dense Micro-Triangles (~{c_dens:,} tris/m²): Tightly packed faces can slow prediction.", icon='ERROR')
         else:
             sum_box.label(text=f"Current Mesh: {tris:,} triangles (Click 'Check Collision' to preview shapes)", icon='INFO')
     else:
@@ -1266,6 +1332,16 @@ def _draw_simple_page2_collision(layout, context, prop, obj, metrics):
         text="Ramp Tip: Ultra-flat feathered ramp entries can buck the skater — prop the entry to a slightly steeper transition angle from flat ground.",
         icon='LIGHT',
     )
+
+
+def _fmt_vram_mb(vram_mb: float) -> str:
+    """Formats an uncompressed GPU VRAM size in MB or GB."""
+    v = max(0.0, float(vram_mb))
+    if v >= 1024.0:
+        return f"{v / 1024.0:.2f} GB"
+    if v >= 10.0:
+        return f"{v:.0f} MB"
+    return f"{v:.1f} MB"
 
 
 def _draw_multi_shader_atlas_warning(layout, obj, prop=None):
@@ -1281,16 +1357,19 @@ def _draw_multi_shader_atlas_warning(layout, obj, prop=None):
             atlas_res = int(getattr(prop, "atlas_resolution", 2048) or 2048)
         except Exception:
             atlas_res = 2048
-    grid_dim = max(2, int(math.ceil(math.sqrt(n_slots))))
-    raw_px = float(atlas_res) / float(grid_dim)
-    eff_px = int(round(raw_px / 10.0) * 10) if grid_dim == 3 else int(round(raw_px))
+    spec = (
+        compiler_bridge.estimate_prop_atlas_spec(obj, atlas_res)
+        if hasattr(compiler_bridge, "estimate_prop_atlas_spec")
+        else {"px_per_slot": atlas_res // max(2, int(math.ceil(math.sqrt(n_slots))))}
+    )
+    eff_px = int(spec["px_per_slot"])
 
     w_box = layout.box()
-    w_box.alert = True
+    w_box.alert = (eff_px < 1024)
     w_head = w_box.row(align=True)
     w_head.label(
-        text=f"⚠️ Multi-Shader Atlas Notice: {n_slots} shaders on a {atlas_res} atlas = ~{eff_px}px per shader",
-        icon='ERROR',
+        text=f"Multi-Shader Atlas: {n_slots} shaders @ {atlas_res} = ~{eff_px}px per shader",
+        icon='ERROR' if eff_px < 1024 else 'INFO',
     )
     w_col = w_box.column(align=True)
     w_col.alert = False
@@ -1299,8 +1378,65 @@ def _draw_multi_shader_atlas_warning(layout, obj, prop=None):
         text="• Skate. packs all material slots on a prop into one shared texture sheet (atlas).",
     )
     w_col.label(
-        text="• More material slots = smaller texture slice per shader (lower in-game sharpness). Combine into 1 shader for full crispness.",
+        text="• Increase Atlas Resolution below (4K / 8K / 16K) for more per-shader pixels, or combine into 1 shader.",
     )
+
+
+def _draw_atlas_resolution_selector_box(layout, prop, obj):
+    """Draws the per-prop Texture Atlas Resolution selector (1K–16K) with live sheet dimensions & VRAM notices."""
+    if prop is None:
+        return
+    res_box = layout.box()
+    res_box.prop(prop, "atlas_resolution", text="Atlas Resolution")
+    try:
+        atlas_res_int = int(getattr(prop, "atlas_resolution", 2048) or 2048)
+    except Exception:
+        atlas_res_int = 2048
+
+    spec = (
+        compiler_bridge.estimate_prop_atlas_spec(obj, atlas_res_int)
+        if hasattr(compiler_bridge, "estimate_prop_atlas_spec")
+        else {"eff_w": atlas_res_int, "eff_h": atlas_res_int, "is_rect_2x1": False, "n_slots": 1, "px_per_slot": atlas_res_int, "n_maps": 2, "vram_mb": 0.0}
+    )
+    eff_w = int(spec["eff_w"])
+    eff_h = int(spec["eff_h"])
+    n_slots = int(spec["n_slots"])
+    px_slot = int(spec["px_per_slot"])
+    vram_str = _fmt_vram_mb(float(spec["vram_mb"]))
+
+    info_row = res_box.row(align=True)
+    info_row.scale_y = 0.88
+    if n_slots <= 1:
+        info_row.label(
+            text=f"Sheet: {eff_w}×{eff_h}  |  Full {eff_w}px Sharpness  |  ~{vram_str} VRAM",
+            icon='TEXTURE',
+        )
+    elif spec.get("is_rect_2x1"):
+        info_row.label(
+            text=f"Sheet: {eff_w}×{eff_h} (2:1 Auto-Rect, 50% Smaller)  |  {px_slot}px/Shader  |  ~{vram_str} VRAM",
+            icon='TEXTURE',
+        )
+    else:
+        info_row.label(
+            text=f"Sheet: {eff_w}×{eff_h} ({n_slots} Shaders)  |  ~{px_slot}px/Shader  |  ~{vram_str} VRAM",
+            icon='TEXTURE',
+        )
+
+    if atlas_res_int == 8192:
+        n_row = res_box.row(align=True)
+        n_row.scale_y = 0.88
+        n_row.label(
+            text=f"ℹ️ 8K Atlas (~{vram_str} VRAM): Brief 1–2s load on first placement in-game (instant on repeats).",
+            icon='INFO',
+        )
+    elif atlas_res_int >= 16384:
+        w_row = res_box.row(align=True)
+        w_row.alert = True
+        w_row.scale_y = 0.88
+        w_row.label(
+            text=f"⚠️ 16K Extreme (~{vram_str} VRAM): Large file & 2–4s first-spawn hitch; heavy on 8 GB GPUs. Use 4K/8K unless needed.",
+            icon='ERROR',
+        )
 
 
 def _draw_simple_page3_surfaces(layout, context, prop, obj):
@@ -1314,6 +1450,7 @@ def _draw_simple_page3_surfaces(layout, context, prop, obj):
 
     slots = list(obj.material_slots)
     _draw_multi_shader_atlas_warning(p_box, obj, prop)
+    _draw_atlas_resolution_selector_box(p_box, prop, obj)
 
     surf_box = p_box.box()
     surf_box.label(text=f"Material Surfaces ({max(1, len(slots))} Slot{'s' if len(slots) != 1 else ''})", icon='SOUND')
@@ -2113,6 +2250,33 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
             prog_box.label(text=prop.compile_status_msg)
         prog_box.operator("reskate.cancel_compile", text="Cancel", icon='CANCEL')
     else:
+        if hasattr(compiler_bridge, "get_pack_weight_summary"):
+            try:
+                wt = compiler_bridge.get_pack_weight_summary(context, resolved_mod, ordered_scene_objs, mod_info)
+                if wt.get("total_props", 0) > 0:
+                    vram_str = _fmt_vram_mb(float(wt.get("total_vram_mb", 0.0)))
+                    wt_row = p_box.row(align=True)
+                    wt_row.scale_y = 0.90
+                    if wt.get("is_heavy"):
+                        wt_row.alert = True
+                        tags = []
+                        if wt.get("n_16k", 0) > 0:
+                            tags.append(f"{wt['n_16k']}× 16K")
+                        if wt.get("n_8k", 0) > 0:
+                            tags.append(f"{wt['n_8k']}× 8K")
+                        if wt.get("n_heavy_col", 0) > 0:
+                            tags.append(f"{wt['n_heavy_col']}× Heavy Col")
+                        wt_row.label(
+                            text=f"⚠️ Est. Pack Weight: ~{vram_str} VRAM ({', '.join(tags)}) — Brief pause on first spawn",
+                            icon='ERROR',
+                        )
+                    else:
+                        wt_row.label(
+                            text=f"📊 Est. Pack Weight: ~{vram_str} VRAM ({wt['total_props']} prop(s)) — Fast-spawning",
+                            icon='INFO',
+                        )
+            except Exception:
+                pass
         comp_row = p_box.row(align=True)
         comp_row.scale_y = 1.55
         comp_row.enabled = (not bool(block_reason)) and (obj is not None or n_sel > 0)
@@ -2175,7 +2339,7 @@ def _draw_simple_page6_package_compile(layout, context, prop, obj):
             st_box = p_box.box()
             st_box.alert = True
             st_box.label(text=prop.compile_status_msg, icon='ERROR')
-            st_box.label(text="Full log: Edit → Preferences → Add-ons → ReSkate Prop Studio.", icon='INFO')
+            st_box.label(text="Full log: Edit → Preferences → Add-ons → ReSkate QuickDrop Studio.", icon='INFO')
             log_btn = st_box.row(align=True)
             log_btn.alert = False
             log_btn.operator("reskate.open_addon_preferences", text="View Compiler Log in Preferences", icon='PREFERENCES')
@@ -2333,7 +2497,7 @@ def _draw_session_update_banner(layout):
         dismissed = bool(getattr(compiler_bridge, "_SESSION_UPDATE_DISMISSED", False))
         if not latest_tag or dismissed:
             return
-        cur_ver = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "0.32.3") or "0.32.3")
+        cur_ver = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "1.0.0") or "1.0.0")
         rel_url = str(
             getattr(compiler_bridge, "_SESSION_UPDATE_HTML_URL", "")
             or "https://github.com/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -2356,7 +2520,7 @@ def _draw_session_update_banner(layout):
 
 class RESKATE_PT_main_panel(RESKATE_PT_base, Panel):
     bl_idname = "RESKATE_PT_main_panel"
-    bl_label = "ReSkate Prop Studio"
+    bl_label = "ReSkate QuickDrop Studio"
     bl_order = 0
 
     def draw_header(self, context):
@@ -2395,7 +2559,7 @@ class RESKATE_PT_main_panel(RESKATE_PT_base, Panel):
                 mode_row.prop(prop, "ui_mode", expand=True)
 
         if prop is None:
-            layout.label(text="Prop Studio settings not initialized", icon='ERROR')
+            layout.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         # In Simple Mode, render the self-contained 5-Page Simple Mode Wizard
@@ -2460,7 +2624,7 @@ class RESKATE_PT_card1_setup(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         prefs = _props.get_addon_preferences(context)
@@ -2582,7 +2746,7 @@ class RESKATE_PT_card2_collision(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         active_raw = getattr(context, "active_object", None)
@@ -3150,7 +3314,7 @@ class RESKATE_PT_card4_textures(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         r_maps = []
@@ -3324,7 +3488,7 @@ class RESKATE_PT_card4_textures(RESKATE_PT_base, Panel):
                 text="Toggle PBR Neutral Viewport Preview",
                 icon='COLOR',
             )
-            adv_box.prop(prop, "atlas_resolution", text="Texture Export Resolution (Up to 8K)")
+            adv_box.prop(prop, "atlas_resolution", text="Texture Export Resolution (1K – 16K)")
             adv_box.prop(prop, "enable_custom_textures", text="Pack & Enable Custom Textures in Mod", icon='TEXTURE')
             adv_box.prop(prop, "albedo_tint", text="Color Tint")
             adv_box.prop(prop, "dielectric_specular", text="Fallback Specular", slider=True)
@@ -3403,7 +3567,7 @@ class RESKATE_PT_card5_lights(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         # Add Spot / Point Light buttons
@@ -3496,7 +3660,7 @@ class RESKATE_PT_card5_lights_thumb(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         card.label(
@@ -3636,7 +3800,7 @@ class RESKATE_PT_card6_export(RESKATE_PT_base, Panel):
 
         card = layout.box()
         if prop is None:
-            card.label(text="Prop Studio settings not initialized", icon='ERROR')
+            card.label(text="QuickDrop Studio settings not initialized", icon='ERROR')
             return
 
         _draw_havok_ceiling_warning(card, context, obj, source_panel="ship")
@@ -3804,7 +3968,7 @@ class RESKATE_PT_card6_export(RESKATE_PT_base, Panel):
                 err_box = card.box()
                 err_box.alert = True
                 err_box.label(text=prop.compile_status_msg, icon='ERROR')
-                err_box.label(text="Full log: Edit → Preferences → Add-ons → ReSkate Prop Studio.", icon='INFO')
+                err_box.label(text="Full log: Edit → Preferences → Add-ons → ReSkate QuickDrop Studio.", icon='INFO')
 
             open_row = card.row(align=True)
             open_row.scale_y = 1.25

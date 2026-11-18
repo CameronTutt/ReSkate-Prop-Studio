@@ -1,5 +1,5 @@
 # ==============================================================================
-# ReSkate Prop Studio — Exact In-Game Player & Skateboard 3D Reference Meshes
+# ReSkate QuickDrop Studio — Exact In-Game Player & Skateboard 3D Reference Meshes
 # Extracted directly from Skate. Data/Win32/items.toc Frostbite MeshSet chunks:
 #   Player Character (Standing Height = 1.81217 m / 5'11.34"):
 #     - Head:  cas_rsp_head_base_mesh (Bundle 1104, Y = 1.44551..1.81217 m)

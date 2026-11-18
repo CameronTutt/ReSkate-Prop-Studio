@@ -1,5 +1,5 @@
 """
-ReSkate Prop Studio - properties.py
+ReSkate QuickDrop Studio - properties.py
 Property groups, Frostbite surface enums, and Scene/Object registrations
 for the 7-Step Checklist UX Redesign:
   Setup → Collision → Grind → Look → Light (in-game) → Thumbnail → Ship
@@ -241,15 +241,16 @@ def get_addon_preferences(context=None):
     ctx = context if context is not None else bpy.context
     if ctx is None or not hasattr(ctx, "preferences") or ctx.preferences is None:
         return None
-    pkg = __package__ or "reskate_prop_studio_addon"
+    pkg = __package__ or "reskate_quickdrop_studio_addon"
     addon = (
         ctx.preferences.addons.get(pkg)
+        or ctx.preferences.addons.get("reskate_quickdrop_studio_addon")
         or ctx.preferences.addons.get("reskate_prop_studio_addon")
         or ctx.preferences.addons.get("sk8_prop_authoring_addon")
     )
     if addon is None:
         for k, a in ctx.preferences.addons.items():
-            if k.endswith(("reskate_prop_studio_addon", "sk8_prop_authoring_addon")):
+            if k.endswith(("reskate_quickdrop_studio_addon", "reskate_prop_studio_addon", "sk8_prop_authoring_addon")):
                 addon = a
                 break
     return getattr(addon, "preferences", None) if addon else None
@@ -460,7 +461,7 @@ def _on_overlay_master_pref_changed(self, context):
     try:
         if ctx and getattr(ctx, "preferences", None):
             for k, addon_entry in ctx.preferences.addons.items():
-                if k.endswith(("reskate_prop_studio_addon", "sk8_prop_authoring_addon")) and getattr(addon_entry, "preferences", None) is not None:
+                if k.endswith(("reskate_quickdrop_studio_addon", "reskate_prop_studio_addon", "sk8_prop_authoring_addon")) and getattr(addon_entry, "preferences", None) is not None:
                     p_inst = addon_entry.preferences
                     if p_inst is not self:
                         try:
@@ -675,7 +676,7 @@ class ReSkateAddonPreferences(bpy.types.AddonPreferences):
 
         # 1. Required Author & Paths
         box = layout.box()
-        box.label(text="ReSkate Prop Studio — Setup & Paths", icon='PREFERENCES')
+        box.label(text="ReSkate QuickDrop Studio — Setup & Paths", icon='PREFERENCES')
         col = box.column(align=True)
 
         auth_val = str(getattr(self, "author_name", "") or "").strip()
@@ -771,7 +772,7 @@ class ReSkateAddonPreferences(bpy.types.AddonPreferences):
         upd_box.label(text=f"Updates & Credits (v{compiler_bridge.ADDON_VERSION})", icon='WORLD')
         upd_row = upd_box.row(align=True)
         upd_row.operator("reskate.check_for_updates", text="Check for Updates", icon='FILE_REFRESH')
-        op_gh = upd_row.operator("wm.url_open", text="GitHub Repository (ReSkate Prop Studio)", icon='URL')
+        op_gh = upd_row.operator("wm.url_open", text="GitHub Repository (ReSkate QuickDrop Studio)", icon='URL')
         op_gh.url = GITHUB_REPO_URL
         status_txt = str(getattr(self, "last_update_status", "") or getattr(self, "update_check_status", "") or "").strip()
         if status_txt:
@@ -1401,10 +1402,11 @@ BLENDER_ORG_CATALOG = {
 BLENDER_ORG_TEXTURE_CATALOG = BLENDER_ORG_CATALOG
 
 ATLAS_RESOLUTIONS = [
-    ('1024', "1024 × 1024 (1K Standard)", "Fast 1K native texture compilation"),
-    ('2048', "2048 × 2048 (2K High-Res Supersampled)", "2K bake supersampled for crisp normal and roughness edges"),
-    ('4096', "4096 × 4096 (4K Ultra Supersampled)", "4K bake supersampled with Lanczos anti-aliasing"),
-    ('8192', "8192 × 8192 (8K Extreme Supersampled)", "8K ultra-crisp supersampled bake for hero props and packs"),
+    ('1024', "1024 × 1024 (1K Standard)", "Fast, lightweight 1K native texture sheet (~2.7 MB VRAM)"),
+    ('2048', "2048 × 2048 (2K High-Res — Default)", "Balanced 2K texture sheet for crisp everyday props (~10.7 MB VRAM)"),
+    ('4096', "4096 × 4096 (4K Ultra)", "Sharp 4K texture sheet for large props or 2–4 shaders (~42.7 MB VRAM)"),
+    ('8192', "8192 × 8192 (8K Extreme)", "True 8K texture sheet for multi-shader or large props (~171 MB VRAM; ~1–2s load on first spawn)"),
+    ('16384', "16384 × 16384 (16K Max — Heavy!)", "D3D12 max 16K texture sheet (~683 MB VRAM; 2–4s load on first spawn, high-VRAM GPUs recommended)"),
 ]
 
 DETAIL_2X2M_PRESET_ITEMS = [
@@ -1907,7 +1909,7 @@ _PER_PROP_DEFAULTS = {
     "use_full_surface_catalog": False,
     "full_surface_catalog": "material_0096",
     "surface_material_code": 96,
-    "max_col_tris": 5000,
+    "max_col_tris": 100000,
     "trim_bottom": 0.0,
     "anti_lip_enabled": False,
     "anti_lip_sink_m": 0.015,
@@ -2325,8 +2327,8 @@ def get_or_init_object_prop_state(obj: bpy.types.Object) -> dict:
         # Unless user explicitly turned on Custom Prop ID Override, keep prop_id_locked=False so Prop Name always updates Prop ID
         if not bool(obj.get("reskate_custom_id_override", False)):
             state["prop_id_locked"] = False
-        if int(state.get("max_col_tris", 5000) or 5000) == 2500:
-            state["max_col_tris"] = 5000
+        if int(state.get("max_col_tris", 100000) or 100000) in (2500, 5000):
+            state["max_col_tris"] = 100000
         if state.get("placement_proxy_mode") == "BOUNDING_BOX" and not bool(obj.get("reskate_pphys_mode_explicit", False)):
             state["placement_proxy_mode"] = "MATCH_COLLISION"
         raw_tab = str(state.get("custom_qd_tab") or "").strip()
@@ -2595,7 +2597,7 @@ def load_prop_settings_from_object(prop, obj: bpy.types.Object | None) -> bool:
 def sync_active_object_props(context=None) -> bool:
     """
     Checks if the active mesh object changed and synchronizes `scene.reskate_prop`
-    to reflect the newly selected object's saved Prop Studio settings.
+    to reflect the newly selected object's saved QuickDrop Studio settings.
     """
     global _IS_SYNCING_PROP
     if _IS_SYNCING_PROP:
@@ -2979,7 +2981,7 @@ def get_default_qd_tab_name(context=None) -> str:
     try:
         if ctx and getattr(ctx, "preferences", None):
             for k, addon_entry in ctx.preferences.addons.items():
-                if k.endswith(("reskate_prop_studio_addon", "sk8_prop_authoring_addon")) and getattr(addon_entry, "preferences", None) is not None:
+                if k.endswith(("reskate_quickdrop_studio_addon", "reskate_prop_studio_addon", "sk8_prop_authoring_addon")) and getattr(addon_entry, "preferences", None) is not None:
                     cand = str(getattr(addon_entry.preferences, "author_name", "") or "").strip()
                     if cand:
                         author = cand
@@ -4781,9 +4783,9 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
         description="Expand procedural edge chipping, cavity grime, and top-down grind scratch controls",
     )
     max_col_tris: IntProperty(
-        name="Triangle Limit", default=5000, min=500, max=15000, step=250,
+        name="Triangle Limit", default=100000, min=500, max=150000, step=1000,
         update=_make_prop_updater("max_col_tris"),
-        description="Maximum triangles for 1:1 mesh collision before automatic simplification (default 5,000 tris)")
+        description="Maximum triangles for 1:1 skateable collision before simplification (default 100,000 = true 1:1; >25,000 warns of potential skater lag)")
     trim_bottom: FloatProperty(
         name="Flush Bottom Lip", default=0.00, min=0.00, max=0.40, unit='LENGTH', precision=3,
         update=_make_prop_updater("trim_bottom"),
@@ -5076,7 +5078,7 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
     atlas_resolution: EnumProperty(
         name="Bake / Export Resolution", items=ATLAS_RESOLUTIONS, default='2048',
         update=_make_prop_updater("atlas_resolution"),
-        description="Resolution when baking or supersampling textures (1024 Standard, 2048 High-Res, 4096 Ultra Supersampled)")
+        description="Texture atlas sheet resolution for compilation (1K–16K; 2K default; 2-shader props auto-pack 2:1 rectangular sheets)")
     uv_tiling_mult: FloatProperty(
         name="UV Tiling Scale", default=1.0, min=0.1, max=16.0, step=0.1, precision=2,
         update=_update_uv_tiling_mult,
@@ -5412,12 +5414,12 @@ class ReSkatePropSettings(bpy.types.PropertyGroup):
         description="Prop pack name (automatically prefixed with <Author>- when deploying to Skate/Mods/)")
     author_name: StringProperty(
         name="Author Name", default="",
-        description="Author namespace (loaded from Edit -> Preferences -> Add-ons -> ReSkate Prop Studio)")
+        description="Author namespace (loaded from Edit -> Preferences -> Add-ons -> ReSkate QuickDrop Studio)")
     pack_version: StringProperty(
         name="Pack Version", default="0.1.0",
         description="Semantic version of this prop pack (e.g. 0.1.0)")
     pack_description: StringProperty(
-        name="Pack Description", default="Custom skateable props built with ReSkate Prop Studio",
+        name="Pack Description", default="Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio",
         description="Short description for manifest.json and Thunderstore")
     mod_icon_path: StringProperty(
         name="Mod Folder Icon (icon.png)", subtype='FILE_PATH', default="",

@@ -1,5 +1,5 @@
 """
-ReSkate Prop Studio - tutorial_dialogs.py
+ReSkate QuickDrop Studio - tutorial_dialogs.py
 Rich in-Blender [? Tutorial] popovers (width=440), interactive action buttons,
 and auto-step walkthrough operators for the 7-Step Checklist workflow:
   1. Setup → 2. Collision → 3. Grind → 4. Look → 5. Light (in-game) → 6. Thumbnail → 7. Ship
@@ -90,7 +90,7 @@ def draw_card1_content(layout):
     expl_box.label(text="How Origin & Scale Work:", icon='TEXT')
     draw_multiline_text(
         expl_box,
-        "In Skate, props placed from the Quick Drop wheel sit directly on their "
+        "In Skate, Quick Drop Objects (QDOs) placed from the Quick Drop wheel sit directly on their "
         "3D origin point. Using 'Set Origin (Bottom Center)' moves the origin "
         "to the bottom of your mesh without moving your object in the scene."
     )
@@ -131,27 +131,28 @@ def draw_card1_content(layout):
 def draw_architecture_guide_content(layout):
     draw_tutorial_header(
         layout, 0, "How It's Made & Open-Source Architecture", 'INFO',
-        "Community Preview (v0.26.0) — Zero-Donor Frostbite Prop Pipeline"
+        "ReSkate QuickDrop Studio (v1.0.0) — Zero-Donor Quick Drop Object (QDO) Pipeline"
     )
 
     intro_box = layout.box()
-    intro_box.label(text="⚠️ Community Preview (Rough Around the Edges):", icon='EXPERIMENTAL')
+    intro_box.label(text="Open-Source Quick Drop Object (QDO) Architecture:", icon='EXPERIMENTAL')
     draw_multiline_text(
         intro_box,
-        "This tool is an open-source preview shared so anyone can build custom "
-        "skateable Quick Drop props and learn how Skate.'s Frostbite asset "
-        "pipeline works under the hood."
+        "ReSkate QuickDrop Studio is an open-source Blender toolkit built so anyone can create custom "
+        "skateable Quick Drop Objects (QDOs) — ledges, handrails, flatbars, hubbas, ramps, and obstacles — "
+        "and learn how Skate.'s Frostbite asset pipeline works under the hood."
     )
     draw_multiline_text(
         intro_box,
-        "Known rough edges: (1) Single-shape 1:1 Havok collision caps at 2,600 "
-        "welded vertices / 5,000 tris before engine decimation; (2) Quick Drop "
-        "placement bounds (_PPHYS) must remain a simple 1-Box hull to avoid "
+        "Engine notes & guardrails: (1) High-poly skate collision above ~25,000 triangles "
+        "or tightly packed micro-triangles (>1,000 tris/m²) may cause skater "
+        "prediction lag even though 1:1 multi-shape compiles up to 100K tris; "
+        "(2) Quick Drop placement bounds (_PPHYS) must remain a simple 1-Box hull to avoid "
         "engine crashes; (3) New .fbmod TOC additions require restarting Skate.exe."
     )
 
     pipe_box = layout.box()
-    pipe_box.label(text="🛠️ How a Standalone Zero-Donor Prop is Built:", icon='FILE_SCRIPT')
+    pipe_box.label(text="🛠️ How a Standalone Zero-Donor Quick Drop Object (QDO) is Built:", icon='FILE_SCRIPT')
     draw_multiline_text(
         pipe_box,
         "1. Additive Bundle Registration (buildkititems.toc): Instead of overwriting "
@@ -179,7 +180,7 @@ def draw_architecture_guide_content(layout):
     )
     draw_multiline_text(
         pipe_box,
-        "5. Quick Drop Wheel Registration (items.toc): Appends your prop's GUIDs to "
+        "5. Quick Drop Wheel Registration (items.toc): Appends your QDO's GUIDs to "
         "Items/ItemMasterCollection and tags its DelMarBaseItemAsset with "
         "cas_main_sharedbundle (0x04308B5D) so it appears in the Quick Drop menu."
     )
@@ -215,13 +216,13 @@ def draw_card2_content(layout):
     )
     draw_multiline_text(
         expl_box,
-        "By default, 'Same as visible mesh (1:1)' uses your exact model. If your "
-        "visual mesh exceeds Havok's 1:1 ceiling (2,600 verts / 5,000 tris), click "
-        "'Generate Simplified Collision (_COL)' so your grind edges stay crisp."
+        "By default, 'Same as visible mesh (1:1)' compiles your exact collision up "
+        "to 100K triangles. If your prop exceeds 25,000 tris or has dense micro-triangles "
+        "(>1,000 tris/m²), click 'Generate Simplified Collision (_COL)' or Simple Hulls to keep gameplay smooth."
     )
 
     draw_skate_values_box(layout, "Collision, Grind & Surface Guide", [
-        ("1:1 Havok Ceiling", "≤ 2,600 Welded Verts / ≤ 5,000 Triangles"),
+        ("Recommended 1:1 Budget", "≤ 25,000 Triangles recommended (up to 100K 1:1 multi-shape supported)"),
         ("Smooth Plaza Ledges", "Concrete Smooth (Grindable at ≥ 35°–42°)"),
         ("Metal Copings / Rails", "Metal Solid or Metal Round Rail"),
         ("Cylindrical Rails", "Enable 'Round Rail Lock-On Mode'"),
@@ -307,7 +308,7 @@ def draw_card4_content(layout):
     expl_box.label(text="Your Blender Shader Exports Automatically:", icon='TEXT')
     draw_multiline_text(
         expl_box,
-        "Prop Studio automatically reads your material's Principled BSDF nodes "
+        "QuickDrop Studio automatically reads your material's Principled BSDF nodes "
         "(Base Color, Normal, Roughness, Metallic, Alpha) and preserves your UVs."
     )
     draw_multiline_text(
@@ -353,7 +354,7 @@ def draw_card5_content(layout):
     )
     draw_multiline_text(
         expl_box,
-        "Step 5 ('Thumbnail'): Renders clean 256×256 and 768×768 icons for the "
+        "Step 5 ('Thumbnail'): Renders clean 256×256 and 768×768 icons for your QDO in the "
         "in-game Quick Drop wheel, or lets you pick any custom PNG."
     )
 
@@ -385,20 +386,20 @@ def draw_card5_content(layout):
 def draw_card6_content(layout):
     draw_tutorial_header(
         layout, 6, "Ship", 'PACKAGE',
-        "Zero-Donor Standalone Compiler & Multi-Prop Pack Builder"
+        "Zero-Donor Standalone QDO Compiler & Multi-Prop Quick Drop Pack Builder"
     )
 
     expl_box = layout.box()
-    expl_box.label(text="Shipping Your Prop or Multi-Prop Pack:", icon='TEXT')
+    expl_box.label(text="Shipping Your QDO or Multi-Prop Quick Drop Pack:", icon='TEXT')
     draw_multiline_text(
         expl_box,
         "Once all steps show ✅ or ⚠️ (no ❌ blockers), click 'Compile & Deploy "
-        "This Prop' to build a standalone mod package without replacing any "
+        "This Prop' to build a standalone Quick Drop Object (QDO) mod package without replacing any "
         "vanilla Skate items."
     )
     draw_multiline_text(
         expl_box,
-        "Want to bundle multiple props into one mod pack? Select multiple prop "
+        "Want to bundle multiple QDOs into one Quick Drop pack? Select multiple prop "
         "meshes in the 3D Viewport and click 'Compile & Deploy Selected Props' — "
         "or compile them one by one into the same Pack Folder (they merge additively!)."
     )
@@ -736,7 +737,7 @@ class RESKATE_OT_export_auto_step(bpy.types.Operator):
 class WM_OT_reskate_architecture_guide(bpy.types.Operator):
     bl_idname = "wm.reskate_architecture_guide"
     bl_label = "How It's Made & Architecture Guide"
-    bl_description = "Open the Open-Source Architecture & 'How It's Made' technical guide for ReSkate Prop Studio"
+    bl_description = "Open the Open-Source Architecture & 'How It's Made' technical guide for ReSkate QuickDrop Studio"
     bl_options = {'INTERNAL'}
 
     def invoke(self, context, event):

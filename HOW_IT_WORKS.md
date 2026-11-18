@@ -1,6 +1,6 @@
-# How It's Made: ReSkate Zero-Donor Standalone Prop Architecture
+# How It's Made: ReSkate Zero-Donor Standalone Quick Drop Object (QDO) Architecture
 
-This document explains **how custom standalone Quick Drop props work in *Skate.* (Frostbite)** and how **ReSkate Prop Studio** (`sk8_prop_authoring_addon`) + `compile_blender_prop.py` build them from scratch without replacing any base-game items.
+This document explains **how standalone Quick Drop Objects (`QDOs`) and custom Quick Drop obstacles work in *Skate.* (Frostbite)**—from street ledges, handrails, flatbars, hubbas, stairs, and manny pads to kickers, quarterpipes, DIY skate spots, and custom skateparks—and how **ReSkate QuickDrop Studio (`v1.0.0`)** (`sk8_prop_authoring_addon`) + `compile_blender_prop.py` build them from scratch without replacing any base-game items.
 
 Everything here is open source so you can inspect, modify, or build your own tools on top of these findings.
 
@@ -33,7 +33,7 @@ Everything here is open source so you can inspect, modify, or build your own too
 
 Early prop mods worked by overwriting an existing base-game prop's `MeshSet` and `HavokPhysicsData` ("donor hijacking"), which meant you could only replace existing items and two mods replacing the same donor would conflict.
 
-**ReSkate Prop Studio uses a Zero-Donor Additive Architecture:**
+**ReSkate QuickDrop Studio (`v1.0.0`) uses a Zero-Donor Additive Architecture:**
 1. Every custom prop is packaged into its own brand-new bundle path:
    - **Bundle Path:** `win32/items/customprops/<prop_name>_bundle`
    - **TOC Target:** `Win32/buildkititems.toc`
@@ -61,9 +61,10 @@ Frostbite binds textures and material constants through `ShaderBlockDepot` (`RES
 
 ### A. `0x771` (`1,905`-Byte) Category 0 Opaque PBR Shader
 Used for standard solid skatepark materials (concrete, wood, metal, painted surfaces):
-- **Albedo (`_c`)**: BC7 sRGB mipchain (`1024×1024` up to `4096×4096`).
-- **Normal (`_ny`)**: BC7 Linear two-channel tangent-space normal map (`R = X`, `G = Y`).
-- **Packed Mask (`_msk`)**: BC7 Linear packed map:
+- **Atlas Resolution (`1K – 16K` & `2:1` Auto-Rect)**: Every QDO compiles into selectable BC7 texture atlases from **`1024×1024` up to `16384×16384`** (`2048×2048` 2K default). Two-shader QDOs automatically pack into a **`2:1` rectangular atlas** (e.g., `2048×1024`, `4096×2048`, `8192×4096`), cutting VRAM usage by 50%.
+- **Albedo (`_c`)**: BC7 sRGB mipchain (`1024×1024` up to `16384×16384`, or `2:1` rectangular).
+- **Normal (`_ny`)**: BC7 Linear two-channel tangent-space normal map (`R = X`, `G = Y`) matching the selected atlas dimensions.
+- **Packed Mask (`_msk`)**: BC7 Linear packed map matching the selected atlas dimensions:
   - `R` = Ambient Occlusion (`AO`)
   - `G` = **Smoothness** (`1.0 - Roughness`)
   - `B` = **Metallic**
@@ -91,9 +92,9 @@ When a prop has both solid materials and a material slot marked **`🩹 Treat Ma
 ## 5. Havok Collision, Grind Detection & Surface Audio (`0x41759364`)
 
 ### A. Why Grind Edges Come Directly from Collision Geometry
-In *Skate.*, there are **no separate grind spline resources** on static Quick Drop props. Instead, the engine analyzes your Havok collision mesh (`hknpCompressedMeshShapeData`) at load/placement time:
-- Any convex edge whose adjacent triangle normals form a sharp dihedral crease (roughly **`35°` to `90°`**) and whose surface material has **`PropertySlot 71` (`IncludeInSurfaceAnalysis = True`)** becomes a grindable ledge, rail, or coping edge.
-- **Havok 1:1 Ceiling (`2,600` Welded Verts / `5,000` Tris)**: A single `hknpCompressedMeshShapeData` tree holds up to ~`2,600` welded vertices / `5,000` triangles. Keeping your collision mesh (or custom `_COL` mesh) under this ceiling guarantees 1:1 physical grind edges without compile-time decimation.
+In *Skate.*, there are **no separate grind spline resources** on static Quick Drop Objects (`QDOs`). Instead, the engine analyzes your Havok collision mesh (`hknpCompressedMeshShapeData`) at load/placement time:
+- Any convex edge whose adjacent triangle normals form a sharp dihedral crease (roughly **`35°` to `90°`**) and whose surface material has **`PropertySlot 71` (`IncludeInSurfaceAnalysis = True`)** becomes a grindable street ledge, handrail, flatbar, hubba, or coping edge.
+- **Havok 1:1 Collision up to `100,000` Triangles (`25K` Soft Warning)**: `compile_blender_prop.py` builds 1:1 `hknpCompressedMeshShapeData` triangle-mesh collision up to **`100,000` triangles** by default (`max_col_tris = 100000`, with visual meshes capped at `65,535` vertices). A **`25K` soft warning** fires above `25,000` triangles (or dense micro-triangles `> 1,000 tris/m²` above `5,000` tris) to warn of potential skater prediction lag; staying under `25,000` tris—or switching to **Simple Hulls** / a custom `_COL` mesh—is recommended for optimal physics performance on custom skateparks and DIY skate spots.
 
 ### B. Surface Physics & Per-Face Audio (`ShapeToFaceMaterialMap`)
 The prop's physics EBX contains a **101-entry `PhysicsMaterial` table** paired with a per-triangle `ShapeToFaceMaterialMap` array:
@@ -124,7 +125,7 @@ To make a standalone prop show up in the in-game Quick Drop menu without replaci
 
 ## 7. In-Game Dynamic Lights (Noble `EffectBlueprint` Pattern)
 
-When you link up to 4 Blender `SPOT` or `POINT` lights in **`💡 4. Light (in-game)`**:
+When you link up to 4 Blender `SPOT` or `POINT` lights in **`Page 4 — Lights (In-Game)`**:
 1. `compiler_bridge.py` extracts each light's local position, forward/up transform matrix, RGB color, Wattage intensity, attenuation radius, inner/outer spot cone angles, and shadow flag relative to the prop's origin.
 2. `compile_blender_prop.py` clones the vanilla Noble Worklight `EffectBlueprint` template and patches its `PbrSpotLightEntityData` and `PbrSphereLightEntityData` nodes with your exact Blender light transforms and radiometric values.
 3. The `EcsRuntimePrefabAsset` spawns the `EffectBlueprint` automatically whenever the prop is placed in the world.

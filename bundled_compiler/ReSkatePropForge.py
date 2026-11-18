@@ -8,6 +8,7 @@ Blender 5.3 Beta Bridge, & Quick Drop Catalog Exporter.
 """
 
 import base64
+import concurrent.futures
 import copy
 import ctypes
 import hashlib
@@ -32,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 from PIL import Image, ImageDraw
+Image.MAX_IMAGE_PIXELS = None
 from pygltflib import GLTF2, Material as GLTFMaterial
 
 try:
@@ -123,18 +125,20 @@ def decompress_cas(pkg: int, cas_num: int, offset: int, comp_size: int) -> bytes
     cur = 0
     while cur < len(raw):
         unc_size, flag_type, c_size = struct.unpack_from(">IHH", raw, cur)
-        comp_data = raw[cur + 8 : cur + 8 + c_size]
-        if flag_type in (0x0070, 0x0000) or unc_size == c_size:
+        is_raw = flag_type in (0x0070, 0x0000, 0x0071) or unc_size == c_size
+        act_sz = unc_size if flag_type in (0x0070, 0x0000, 0x0071) else c_size
+        comp_data = raw[cur + 8 : cur + 8 + act_sz]
+        if is_raw:
             out.extend(comp_data)
         else:
             out_buf = ctypes.create_string_buffer(unc_size)
             ret = oodle.OodleLZ_Decompress(
-                comp_data, c_size, out_buf, unc_size, 1, 1, 0, None, 0, None, None, None, 0, 3
+                comp_data, act_sz, out_buf, unc_size, 1, 1, 0, None, 0, None, None, None, 0, 3
             )
             if ret <= 0:
                 raise RuntimeError(f"OodleLZ_Decompress failed ret={ret}")
             out.extend(out_buf.raw[:ret])
-        cur += 8 + c_size
+        cur += 8 + act_sz
     return bytes(out)
 
 
@@ -152,10 +156,13 @@ def cas_compress_uncompressed(raw: bytes) -> bytes:
             out += struct.pack(">IHH", clen, 0x1170, comp_len) + out_buf.raw[:comp_len]
             pos += clen
         else:
-            sub_len = min(clen, 0xFFF0)
-            sub_chunk = raw[pos : pos + sub_len]
-            out += struct.pack(">IHH", sub_len, 0x0070, sub_len) + sub_chunk
-            pos += sub_len
+            off_sub = 0
+            while off_sub < clen:
+                sub_len = min(clen - off_sub, 0x8000)
+                sub_chunk = chunk[off_sub : off_sub + sub_len]
+                out += struct.pack(">IHH", sub_len, 0x0070, sub_len) + sub_chunk
+                off_sub += sub_len
+            pos += clen
     return bytes(out)
 
 
@@ -543,15 +550,69 @@ def _check_torch_cuda() -> bool:
     return _TORCH_CUDA_AVAILABLE
 
 
+def _encode_rgba_to_bc7_mode6_cpu_strip(rgba_arr: np.ndarray) -> bytes:
+    """Encodes a 4-row-aligned RGBA uint8 strip into BC7 Mode 6 blocks on CPU."""
+    h, w, _ = rgba_arr.shape
+    N = (h // 4) * (w // 4)
+    blocks_u8 = rgba_arr.reshape(h // 4, 4, w // 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(-1, 16, 4)
+    c_min = blocks_u8.min(axis=1).astype(np.int32)
+    c_max = blocks_u8.max(axis=1).astype(np.int32)
+
+    span = c_max - c_min
+    span_len2 = np.maximum(np.sum(span * span, axis=1, keepdims=True), 1)
+    rel = blocks_u8.astype(np.int32) - c_min[:, None, :]
+    num = np.sum(rel * span[:, None, :], axis=2) * 15 + (span_len2 >> 1)
+    idx = np.clip(num // span_len2, 0, 15).astype(np.uint64)
+
+    swap = (idx[:, 0] >= 8)
+    idx = np.where(swap[:, None], 15 - idx, idx)
+    e0 = np.where(swap[:, None], c_max, c_min).astype(np.uint64)
+    e1 = np.where(swap[:, None], c_min, c_max).astype(np.uint64)
+
+    r0, g0, b0, a0 = (e0[:, 0] >> 1), (e0[:, 1] >> 1), (e0[:, 2] >> 1), (e0[:, 3] >> 1)
+    r1, g1, b1, a1 = (e1[:, 0] >> 1), (e1[:, 1] >> 1), (e1[:, 2] >> 1), (e1[:, 3] >> 1)
+    p0 = (e0[:, 0] & 1)
+    p1 = (e1[:, 0] & 1)
+
+    lo = np.full(N, 1 << 6, dtype=np.uint64)
+    lo |= (r0 << 7) | (r1 << 14) | (g0 << 21) | (g1 << 28) | (b0 << 35) | (b1 << 42) | (a0 << 49) | (a1 << 56)
+    lo |= (p0 << 63)
+
+    hi = p1.copy()
+    hi |= ((idx[:, 0] & 0x7) << 1)
+    for k in range(1, 16):
+        shift = 4 + (k - 1) * 4
+        hi |= ((idx[:, k] & 0xF) << shift)
+
+    out = np.empty((N, 2), dtype="<u8")
+    out[:, 0] = lo
+    out[:, 1] = hi
+    return out.tobytes()
+
+
+def _is_constant_rgba(rgba_arr: np.ndarray) -> bool:
+    """Short-circuit constant-color check using 512-row strips to avoid huge temporary allocations on 8K/16K."""
+    h = int(rgba_arr.shape[0])
+    if h <= 0 or rgba_arr.shape[1] <= 0:
+        return True
+    first_px = rgba_arr[0, 0]
+    if h <= 512:
+        return bool(np.all(rgba_arr == first_px))
+    for y0 in range(0, h, 512):
+        if not bool(np.all(rgba_arr[y0 : y0 + 512] == first_px)):
+            return False
+    return True
+
+
 def _encode_rgba_to_bc7_mode6_single(rgba_arr: np.ndarray) -> bytes:
     h, w, _ = rgba_arr.shape
     N = (h // 4) * (w // 4)
 
     # Fast constant-color shortcut: if the entire mip level is a single uniform RGBA color
     # (common for constant roughness/metallic _msk or flat normal _n maps), encode 1 block and tile N times!
-    first_px = rgba_arr[0, 0]
-    if N > 1 and np.all(rgba_arr == first_px):
-        single_blk = _encode_rgba_to_bc7_mode6_single(np.broadcast_to(first_px, (4, 4, 4)).copy())
+    if N > 1 and _is_constant_rgba(rgba_arr):
+        first_px = rgba_arr[0, 0]
+        single_blk = _encode_rgba_to_bc7_mode6_cpu_strip(np.broadcast_to(first_px, (4, 4, 4)).copy())
         return single_blk * N
 
     # Optional GPU / CUDA acceleration via PyTorch when available for large mip levels
@@ -580,46 +641,35 @@ def _encode_rgba_to_bc7_mode6_single(rgba_arr: np.ndarray) -> bytes:
             idx = idx_t.cpu().numpy().astype(np.uint64)
             e0 = e0_t.cpu().numpy().astype(np.uint64)
             e1 = e1_t.cpu().numpy().astype(np.uint64)
+
+            r0, g0, b0, a0 = (e0[:, 0] >> 1), (e0[:, 1] >> 1), (e0[:, 2] >> 1), (e0[:, 3] >> 1)
+            r1, g1, b1, a1 = (e1[:, 0] >> 1), (e1[:, 1] >> 1), (e1[:, 2] >> 1), (e1[:, 3] >> 1)
+            p0 = (e0[:, 0] & 1)
+            p1 = (e1[:, 0] & 1)
+
+            lo = np.full(N, 1 << 6, dtype=np.uint64)
+            lo |= (r0 << 7) | (r1 << 14) | (g0 << 21) | (g1 << 28) | (b0 << 35) | (b1 << 42) | (a0 << 49) | (a1 << 56)
+            lo |= (p0 << 63)
+
+            hi = p1.copy()
+            hi |= ((idx[:, 0] & 0x7) << 1)
+            for k in range(1, 16):
+                shift = 4 + (k - 1) * 4
+                hi |= ((idx[:, k] & 0xF) << shift)
+
+            out = np.empty((N, 2), dtype="<u8")
+            out[:, 0] = lo
+            out[:, 1] = hi
+            return out.tobytes()
         except Exception:
-            idx = None
-    else:
-        idx = None
+            pass
 
-    if idx is None:
-        blocks_u8 = rgba_arr.reshape(h // 4, 4, w // 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(-1, 16, 4)
-        c_min = blocks_u8.min(axis=1).astype(np.int32)
-        c_max = blocks_u8.max(axis=1).astype(np.int32)
+    if h > 1024:
+        strips = [rgba_arr[y0 : min(h, y0 + 512)] for y0 in range(0, h, 512)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 4)) as strip_pool:
+            return b"".join(strip_pool.map(_encode_rgba_to_bc7_mode6_cpu_strip, strips))
 
-        span = c_max - c_min
-        span_len2 = np.maximum(np.sum(span * span, axis=1, keepdims=True), 1)
-        rel = blocks_u8.astype(np.int32) - c_min[:, None, :]
-        num = np.sum(rel * span[:, None, :], axis=2) * 15 + (span_len2 >> 1)
-        idx = np.clip(num // span_len2, 0, 15).astype(np.uint64)
-
-        swap = (idx[:, 0] >= 8)
-        idx = np.where(swap[:, None], 15 - idx, idx)
-        e0 = np.where(swap[:, None], c_max, c_min).astype(np.uint64)
-        e1 = np.where(swap[:, None], c_min, c_max).astype(np.uint64)
-
-    r0, g0, b0, a0 = (e0[:, 0] >> 1), (e0[:, 1] >> 1), (e0[:, 2] >> 1), (e0[:, 3] >> 1)
-    r1, g1, b1, a1 = (e1[:, 0] >> 1), (e1[:, 1] >> 1), (e1[:, 2] >> 1), (e1[:, 3] >> 1)
-    p0 = (e0[:, 0] & 1)
-    p1 = (e1[:, 0] & 1)
-
-    lo = np.full(N, 1 << 6, dtype=np.uint64)
-    lo |= (r0 << 7) | (r1 << 14) | (g0 << 21) | (g1 << 28) | (b0 << 35) | (b1 << 42) | (a0 << 49) | (a1 << 56)
-    lo |= (p0 << 63)
-
-    hi = p1.copy()
-    hi |= ((idx[:, 0] & 0x7) << 1)
-    for k in range(1, 16):
-        shift = 4 + (k - 1) * 4
-        hi |= ((idx[:, k] & 0xF) << shift)
-
-    out = np.empty((N, 2), dtype="<u8")
-    out[:, 0] = lo
-    out[:, 1] = hi
-    return out.tobytes()
+    return _encode_rgba_to_bc7_mode6_cpu_strip(rgba_arr)
 
 
 def _is_fast_pipeline_mode() -> bool:
@@ -643,28 +693,25 @@ def encode_rgba_to_bc7_mipchain(img: Image.Image, width: int, height: int, mip_s
 
     # Fast Constant-Color BC7 Mipchain Shortcut: if all pixels share identical RGBA,
     # encode a single 4x4 BC7 Mode 6 block once and tile it across all mip levels (< 0.001s)!
-    if fast_mode and base_arr.size >= 4:
-        c_min = base_arr.min(axis=(0, 1))
-        c_max = base_arr.max(axis=(0, 1))
-        if np.array_equal(c_min, c_max):
-            block4x4 = np.broadcast_to(c_min.reshape((1, 1, 4)), (4, 4, 4)).copy()
-            single_blk16 = _encode_rgba_to_bc7_mode6_single(block4x4)
-            if len(single_blk16) == 16:
-                out_const = bytearray()
-                for expected_sz in mip_sizes:
-                    if expected_sz <= 0:
-                        break
-                    n_blks = expected_sz // 16
-                    rem = expected_sz - (n_blks * 16)
-                    out_const.extend(single_blk16 * n_blks)
-                    if rem > 0:
-                        out_const.extend(b"\x00" * rem)
-                return bytes(out_const)
+    if base_arr.size >= 4 and _is_constant_rgba(base_arr):
+        block4x4 = np.broadcast_to(base_arr[0, 0].reshape((1, 1, 4)), (4, 4, 4)).copy()
+        single_blk16 = _encode_rgba_to_bc7_mode6_cpu_strip(block4x4)
+        if len(single_blk16) == 16:
+            out_const = bytearray()
+            for expected_sz in mip_sizes:
+                if expected_sz <= 0:
+                    break
+                n_blks = expected_sz // 16
+                rem = expected_sz - (n_blks * 16)
+                out_const.extend(single_blk16 * n_blks)
+                if rem > 0:
+                    out_const.extend(b"\x00" * rem)
+            return bytes(out_const)
 
     bc7_cache_file = None
     if fast_mode:
         try:
-            img_sha1 = hashlib.sha1(base_arr.tobytes()).hexdigest()
+            img_sha1 = hashlib.sha1(memoryview(np.ascontiguousarray(base_arr))).hexdigest()
             mips_tag = f"{len(mip_sizes)}_{sum(int(x) for x in mip_sizes if x > 0)}"
             bc7_dir = _get_compiler_cache_root() / "bc7_v1"
             bc7_dir.mkdir(parents=True, exist_ok=True)
@@ -3540,6 +3587,56 @@ def _load_b16_vfx_bundle_assets() -> dict | None:
         return None
 
 
+def _calc_bc7_mip_sizes(w: int, h: int) -> list[int]:
+    """Calculates per-mip BC7 byte sizes for dimensions (w, h) down to 1x1."""
+    mips = []
+    cw, ch = w, h
+    while True:
+        mips.append(max(1, (cw + 3) // 4) * max(1, (ch + 3) // 4) * 16)
+        if cw == 1 and ch == 1:
+            break
+        cw = max(1, cw // 2)
+        ch = max(1, ch // 2)
+    return mips
+
+
+def _infer_bc7_dims_and_mips(raw_bc7_len: int, hint_dims=None) -> tuple[int, int, int, list[int]]:
+    """Infers (tex_w, tex_h, n_mips, mip_sizes) for 64..16384 square or rectangular BC7 mipchains."""
+    if (
+        isinstance(hint_dims, (tuple, list))
+        and len(hint_dims) == 2
+        and int(hint_dims[0]) >= 4
+        and int(hint_dims[1]) >= 4
+    ):
+        hw = max(4, min(16384, 1 << int(max(4, int(hint_dims[0])) - 1).bit_length()))
+        hh = max(4, min(16384, 1 << int(max(4, int(hint_dims[1])) - 1).bit_length()))
+        cand_mips = _calc_bc7_mip_sizes(hw, hh)
+        if sum(cand_mips) == raw_bc7_len:
+            return hw, hh, len(cand_mips), cand_mips
+
+    pots = (16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64)
+    for w in pots:
+        for h in pots:
+            cand_mips = _calc_bc7_mip_sizes(w, h)
+            if sum(cand_mips) == raw_bc7_len:
+                return w, h, len(cand_mips), cand_mips
+
+    if raw_bc7_len >= 300000000:
+        mips = _calc_bc7_mip_sizes(16384, 16384)
+        return 16384, 16384, len(mips), mips
+    if raw_bc7_len >= 80000000:
+        mips = _calc_bc7_mip_sizes(8192, 8192)
+        return 8192, 8192, len(mips), mips
+    if raw_bc7_len >= 20000000:
+        mips = _calc_bc7_mip_sizes(4096, 4096)
+        return 4096, 4096, len(mips), mips
+    if raw_bc7_len >= 5000000:
+        mips = _calc_bc7_mip_sizes(2048, 2048)
+        return 2048, 2048, len(mips), mips
+    mips = _calc_bc7_mip_sizes(1024, 1024)
+    return 1024, 1024, len(mips), mips
+
+
 def build_custom_buildkititems_toc(mod_dir: Path, prop_specs: list, tpl: dict, bundle_stem_base: str = "items/customprops"):
     """
     Build a compliant Frostbite Win32/buildkititems.toc + append bundle sbdata manifests
@@ -3677,50 +3774,13 @@ def build_custom_buildkititems_toc(mod_dir: Path, prop_specs: list, tpl: dict, b
             c_info, _old_h, s_info = chk_by_guid[g_raw]
             c_copy = copy.deepcopy(c_info)
             if is_tex_chk:
-                # Match NOBLE1337-Noble_Lights's exact single-chunk full-mip layout for 1024 (11 mips),
-                # 2048 (12 mips), or 4096 (13 mips) BC7 texture chunks!
+                # Match NOBLE1337-Noble_Lights's exact single-chunk full-mip layout up to 16K (15 mips)!
                 chunks_to_write.append((c_copy["guid_raw"], s_info))
                 raw_top = bytes(cas_bytes[s_info[3] : s_info[3] + s_info[4]])
                 raw_bc7_blob = spec.get(raw_bc7_key) if raw_bc7_key else None
                 raw_bc7_len = len(raw_bc7_blob) if raw_bc7_blob else 1398128
                 hint_dims = spec.get("tex_dims_b39")
-                if (
-                    isinstance(hint_dims, (tuple, list))
-                    and len(hint_dims) == 2
-                    and int(hint_dims[0]) >= 4
-                    and int(hint_dims[1]) >= 4
-                ):
-                    hw = max(4, min(8192, 1 << int(max(4, int(hint_dims[0])) - 1).bit_length()))
-                    hh = max(4, min(8192, 1 << int(max(4, int(hint_dims[1])) - 1).bit_length()))
-                    cand_mips = []
-                    cw, ch = hw, hh
-                    while True:
-                        cand_mips.append(max(1, cw // 4) * max(1, ch // 4) * 16)
-                        if cw == 1 and ch == 1:
-                            break
-                        cw = max(1, cw // 2)
-                        ch = max(1, ch // 2)
-                    if sum(cand_mips) == raw_bc7_len:
-                        tex_w, tex_h, n_mips = hw, hh, len(cand_mips)
-                        mip_sizes = cand_mips
-                    elif raw_bc7_len >= 20000000:
-                        tex_w, tex_h, n_mips = 4096, 4096, 13
-                        mip_sizes = [16777216, 4194304, 1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
-                    elif raw_bc7_len >= 5000000:
-                        tex_w, tex_h, n_mips = 2048, 2048, 12
-                        mip_sizes = [4194304, 1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
-                    else:
-                        tex_w, tex_h, n_mips = 1024, 1024, 11
-                        mip_sizes = [1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
-                elif raw_bc7_len >= 20000000:
-                    tex_w, tex_h, n_mips = 4096, 4096, 13
-                    mip_sizes = [16777216, 4194304, 1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
-                elif raw_bc7_len >= 5000000:
-                    tex_w, tex_h, n_mips = 2048, 2048, 12
-                    mip_sizes = [4194304, 1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
-                else:
-                    tex_w, tex_h, n_mips = 1024, 1024, 11
-                    mip_sizes = [1048576, 262144, 65536, 16384, 4096, 1024, 256, 64, 16, 16, 16]
+                tex_w, tex_h, n_mips, mip_sizes = _infer_bc7_dims_and_mips(raw_bc7_len, hint_dims=hint_dims)
                 total_mip_sz = sum(mip_sizes)
                 mip1_u_off = mip_sizes[0]
                 mip2_u_off = mip_sizes[0] + mip_sizes[1]

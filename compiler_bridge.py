@@ -1,6 +1,6 @@
 """
-ReSkate Prop Studio - compiler_bridge.py
-Internal Addon Bridge Module for non-destructive origin-relative exporting of
+ReSkate QuickDrop Studio - compiler_bridge.py
+Internal Addon Bridge Module for non-destructive origin-relative exporting of Quick Drop Object (QDO)
 geometry, custom collision objects, pass-through / baked textures, thumbnails,
 explicitly linked dynamic lights, vertex grind paths, and manifests, and
 executing compile_blender_prop.py standalone compiler.
@@ -156,15 +156,31 @@ class _NumpyCompatImage:
         x0 = np.floor(xs).astype(np.int32)
         y1 = np.minimum(y0 + 1, max(0, old_h - 1))
         x1 = np.minimum(x0 + 1, max(0, old_w - 1))
-        wy = (ys - y0).astype(np.float32)[:, None]
+        wy = (ys - y0).astype(np.float32)
         wx = (xs - x0).astype(np.float32)[None, :]
-        src = self._arr.astype(np.float32)
-        if src.ndim == 3:
-            wy = wy[:, :, None]
+        if self._arr.ndim == 3:
             wx = wx[:, :, None]
-        top = src[np.ix_(y0, x0)] * (1.0 - wx) + src[np.ix_(y0, x1)] * wx
-        bot = src[np.ix_(y1, x0)] * (1.0 - wx) + src[np.ix_(y1, x1)] * wx
-        out = np.clip(np.round(top * (1.0 - wy) + bot * wy), 0, 255).astype(np.uint8)
+        if new_h <= 512:
+            src = self._arr.astype(np.float32)
+            wy_s = wy[:, None, None] if src.ndim == 3 else wy[:, None]
+            top = src[np.ix_(y0, x0)] * (1.0 - wx) + src[np.ix_(y0, x1)] * wx
+            bot = src[np.ix_(y1, x0)] * (1.0 - wx) + src[np.ix_(y1, x1)] * wx
+            out = np.clip(np.round(top * (1.0 - wy_s) + bot * wy_s), 0, 255).astype(np.uint8)
+            return _NumpyCompatImage(out, mode=self.mode)
+
+        out = (
+            np.empty((new_h, new_w, self._arr.shape[2]), dtype=np.uint8)
+            if self._arr.ndim == 3
+            else np.empty((new_h, new_w), dtype=np.uint8)
+        )
+        for r0 in range(0, new_h, 512):
+            r1 = min(new_h, r0 + 512)
+            y0_s = y0[r0:r1]
+            y1_s = y1[r0:r1]
+            wy_s = wy[r0:r1, None, None] if self._arr.ndim == 3 else wy[r0:r1, None]
+            top = self._arr[np.ix_(y0_s, x0)].astype(np.float32) * (1.0 - wx) + self._arr[np.ix_(y0_s, x1)].astype(np.float32) * wx
+            bot = self._arr[np.ix_(y1_s, x0)].astype(np.float32) * (1.0 - wx) + self._arr[np.ix_(y1_s, x1)].astype(np.float32) * wx
+            out[r0:r1] = np.clip(np.round(top * (1.0 - wy_s) + bot * wy_s), 0, 255).astype(np.uint8)
         return _NumpyCompatImage(out, mode=self.mode)
 
     # =========================================================================
@@ -352,9 +368,9 @@ from .properties import (
 )
 
 _ROOT_PKG_MOD = sys.modules.get(__package__ or "sk8_prop_authoring_addon")
-ADDON_VERSION = str(getattr(_ROOT_PKG_MOD, "ADDON_VERSION", "0.33.4") or "0.33.4")
+ADDON_VERSION = str(getattr(_ROOT_PKG_MOD, "ADDON_VERSION", "1.0.0") or "1.0.0")
 ADDON_VERSION_STR = ADDON_VERSION
-COMPILER_VERSION = "0.33.4"
+COMPILER_VERSION = "1.0.0"
 RESKATE_DISCORD_INVITE_URL = "https://discord.gg/reskate"
 GITHUB_REPO_URL = "https://github.com/CameronTutt/ReSkate-Prop-Studio"
 GITHUB_RELEASES_API_URL = "https://api.github.com/repos/CameronTutt/ReSkate-Prop-Studio/releases/latest"
@@ -387,24 +403,25 @@ def _tag_redraw_all_view3d_for_update_banner():
 
 
 def extract_release_zip_asset_url(payload: dict) -> str:
-    """Extracts the direct download URL for `reskate_prop_studio_addon.zip` from a GitHub Release JSON payload."""
+    """Extracts the direct download URL for the ReSkate QuickDrop Studio add-on zip from a GitHub Release JSON payload."""
     assets = payload.get("assets") if isinstance(payload, dict) else None
     if isinstance(assets, list):
-        for a in assets:
-            if not isinstance(a, dict):
-                continue
-            nm = str(a.get("name") or "").strip().lower()
-            dl = str(a.get("browser_download_url") or "").strip()
-            if dl and nm == "reskate_prop_studio_addon.zip":
-                return dl
-        for a in assets:
-            if not isinstance(a, dict):
-                continue
-            nm = str(a.get("name") or "").strip().lower()
-            dl = str(a.get("browser_download_url") or "").strip()
+        valid_assets = [
+            (
+                str(a.get("name") or "").strip().lower(),
+                str(a.get("browser_download_url") or "").strip(),
+            )
+            for a in assets
+            if isinstance(a, dict)
+        ]
+        for preferred_name in ("reskate_quickdrop_studio_addon.zip", "reskate_prop_studio_addon.zip"):
+            for nm, dl in valid_assets:
+                if dl and nm == preferred_name:
+                    return dl
+        for nm, dl in valid_assets:
             if dl and nm.endswith(".zip"):
                 return dl
-    return f"{GITHUB_REPO_URL}/releases/latest/download/reskate_prop_studio_addon.zip"
+    return f"{GITHUB_REPO_URL}/releases/latest/download/reskate_quickdrop_studio_addon.zip"
 
 
 def _background_session_update_worker() -> None:
@@ -413,7 +430,7 @@ def _background_session_update_worker() -> None:
         import urllib.request
         req = urllib.request.Request(
             GITHUB_RELEASES_API_URL,
-            headers={"User-Agent": f"ReSkatePropStudio/{ADDON_VERSION_STR}", "Accept": "application/vnd.github+json"},
+            headers={"User-Agent": f"ReSkateQuickDropStudio/{ADDON_VERSION_STR}", "Accept": "application/vnd.github+json"},
         )
         with urllib.request.urlopen(req, timeout=3.5) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -1613,6 +1630,7 @@ _ROUGHNESS_SUMMARY_CACHE: dict[tuple, dict] = {}
 _ALIGNMENT_ISSUES_CACHE: dict[str, tuple[tuple, dict]] = {}
 _FACE_SURFACE_SUMMARY_CACHE: dict[str, tuple[tuple, list[dict]]] = {}
 _HAVOK_CEILING_CACHE: dict[tuple, dict] = {}
+_MESH_AREA_CACHE: dict[tuple, float] = {}
 _THIN_MESH_CACHE: dict[tuple, dict] = {}
 _UV_BOUNDS_CACHE: dict[tuple, dict] = {}
 _PREFLIGHT_CHECKS_CACHE: dict[tuple, list[dict]] = {}
@@ -1675,15 +1693,19 @@ def invalidate_roughness_summary_cache(mat_name: str | None = None):
 
 
 def invalidate_havok_ceiling_cache(obj_name: str | None = None):
-    """Clears the cached Havok ceiling status for `obj_name` (or all objects when None)."""
-    global _HAVOK_CEILING_CACHE
+    """Clears the cached Havok ceiling & mesh area status for `obj_name` (or all objects when None)."""
+    global _HAVOK_CEILING_CACHE, _MESH_AREA_CACHE
     if obj_name is None:
         _HAVOK_CEILING_CACHE.clear()
+        _MESH_AREA_CACHE.clear()
     else:
         target = str(obj_name)
         for k in list(_HAVOK_CEILING_CACHE.keys()):
             if isinstance(k, tuple) and len(k) > 0 and k[0] == target:
                 _HAVOK_CEILING_CACHE.pop(k, None)
+        for k in list(_MESH_AREA_CACHE.keys()):
+            if isinstance(k, tuple) and len(k) > 0 and k[0] == target:
+                _MESH_AREA_CACHE.pop(k, None)
 
 
 def invalidate_ui_caches(clear_gpu: bool = False):
@@ -3672,28 +3694,189 @@ def get_object_face_surface_summary(obj: bpy.types.Object | None, context=None) 
     return list(result)
 
 
+def compute_object_surface_area_and_density(
+    obj: bpy.types.Object | None,
+    tri_count: int | None = None,
+) -> tuple[float, float]:
+    """Computes total world-scaled surface area (m^2) and triangle density (tris/m^2) for `obj`."""
+    if obj is None or getattr(obj, "type", None) != 'MESH' or not getattr(obj, "data", None):
+        return (1.0, 0.0)
+    me = obj.data
+    n_polys = len(me.polygons)
+    n_verts = len(me.vertices)
+    if tri_count is None:
+        tri_count = max(0, len(me.loops) - 2 * n_polys) if n_polys > 0 else 0
+    if n_polys <= 0 or tri_count <= 0:
+        return (1.0, 0.0)
+    sx, sy, sz = (abs(float(x)) for x in getattr(obj, "scale", (1.0, 1.0, 1.0)))
+    sig = (obj.name, n_polys, n_verts, round(sx, 3), round(sy, 3), round(sz, 3))
+    area_m2 = _MESH_AREA_CACHE.get(sig)
+    if area_m2 is None:
+        try:
+            buf = np.empty(n_polys, dtype=np.float32)
+            me.polygons.foreach_get("area", buf)
+            if abs(sx - sy) < 1e-4 and abs(sy - sz) < 1e-4:
+                area_m2 = max(0.01, float(buf.sum()) * (sx * sy))
+            else:
+                nbuf = np.empty(n_polys * 3, dtype=np.float32)
+                me.polygons.foreach_get("normal", nbuf)
+                n_xyz = nbuf.reshape(-1, 3)
+                cof = np.array([sy * sz, sx * sz, sx * sy], dtype=np.float32)
+                scaled_factors = np.sqrt(np.sum((n_xyz * cof) ** 2, axis=1))
+                area_m2 = max(0.01, float(np.sum(buf * scaled_factors)))
+        except Exception:
+            dims = getattr(obj, "dimensions", (1.0, 1.0, 1.0))
+            dx, dy, dz = max(0.05, float(dims[0])), max(0.05, float(dims[1])), max(0.05, float(dims[2]))
+            area_m2 = max(0.01, 2.0 * (dx * dy + dy * dz + dx * dz))
+        if len(_MESH_AREA_CACHE) > 64:
+            _MESH_AREA_CACHE.clear()
+        _MESH_AREA_CACHE[sig] = area_m2
+    return (area_m2, float(tri_count) / max(0.01, area_m2))
+
+
+def estimate_prop_atlas_spec(obj: bpy.types.Object | None, atlas_res_int: int) -> dict:
+    """
+    Returns effective BC7 atlas dimensions, per-shader sharpness, 2:1 auto-rect status,
+    map count (_c, _msk, optional _n), and estimated uncompressed GPU VRAM (MB).
+    """
+    res_val = int(atlas_res_int or 2048)
+    n_vis_slots = 0
+    has_normal = False
+    if obj is not None and getattr(obj, "type", None) == 'MESH':
+        slots = list(getattr(obj, "material_slots", ()) or ())
+        for slot in slots:
+            mat = getattr(slot, "material", None)
+            if mat is None:
+                n_vis_slots += 1
+                continue
+            rm = getattr(mat, "reskate_mat", None)
+            sk8_ext = getattr(mat, "sk8_material", None)
+            ms = rm or sk8_ext
+            is_invis = bool(getattr(sk8_ext, "invisible", False) or getattr(ms, "invisible", False)) if ms is not None else False
+            if is_invis:
+                continue
+            n_vis_slots += 1
+            use_ov = bool(getattr(ms, "use_custom_texture_overrides", False)) if ms is not None else False
+            ms_norm = getattr(ms, "normal_image", None) if (ms is not None and use_ov) else None
+            if ms_norm is not None or _normal_image(mat) is not None:
+                has_normal = True
+
+    n_slots = max(1, n_vis_slots)
+    is_rect_2x1 = (n_slots == 2)
+    eff_w = res_val
+    eff_h = max(64, res_val // 2) if is_rect_2x1 else res_val
+    if n_slots <= 1:
+        px_per_slot = eff_w
+    elif is_rect_2x1:
+        px_per_slot = eff_w // 2
+    else:
+        grid_dim = 2 if n_slots <= 4 else (3 if n_slots <= 9 else 4)
+        px_per_slot = eff_w // grid_dim
+
+    n_maps = 3 if has_normal else 2
+    one_map_mb = (float(eff_w) * float(eff_h) * (4.0 / 3.0)) / (1024.0 * 1024.0)
+    vram_mb = one_map_mb * float(n_maps)
+    return {
+        "eff_w": eff_w,
+        "eff_h": eff_h,
+        "is_rect_2x1": is_rect_2x1,
+        "n_slots": n_slots,
+        "px_per_slot": int(px_per_slot),
+        "n_maps": n_maps,
+        "vram_mb": vram_mb,
+    }
+
+
+def get_pack_weight_summary(context, resolved_mod: str, scene_objs: list, mod_info: dict) -> dict:
+    """Computes total estimated VRAM (MB) and counts 8K, 16K, and >25K-tri props across the pack."""
+    prop = getattr(getattr(context, "scene", None), "reskate_prop", None) if context else None
+    active_obj = get_target_mesh_object(context) if context else None
+
+    total_vram_mb = 0.0
+    n_8k = 0
+    n_16k = 0
+    n_heavy_col = 0
+    seen_keys: set[str] = set()
+    total_props = 0
+
+    for o in (scene_objs or []):
+        if o is None or getattr(o, "type", None) != 'MESH':
+            continue
+        total_props += 1
+        st = get_or_init_object_prop_state(o)
+        if active_obj == o and prop is not None:
+            raw_res = getattr(prop, "atlas_resolution", st.get("atlas_resolution", "2048"))
+        else:
+            raw_res = st.get("atlas_resolution", "2048")
+        try:
+            res_int = int(str(raw_res or "2048"))
+        except ValueError:
+            res_int = 2048
+
+        spec = estimate_prop_atlas_spec(o, res_int)
+        total_vram_mb += float(spec["vram_mb"])
+        if res_int >= 16384:
+            n_16k += 1
+        elif res_int >= 8192:
+            n_8k += 1
+
+        h_stat = get_havok_ceiling_status(context, o)
+        if h_stat.get("high_tris") or h_stat.get("high_density"):
+            n_heavy_col += 1
+
+        try:
+            seen_keys.add(get_prop_slug(context, o).lower())
+        except Exception:
+            pass
+
+    for p_det in (mod_info.get("props_detail", []) if isinstance(mod_info, dict) else []):
+        if not isinstance(p_det, dict) or bool(p_det.get("is_pack_icon_prop", False)):
+            continue
+        p_key = str(p_det.get("prop_key") or p_det.get("slug") or "").strip().lower()
+        if p_key and p_key in seen_keys:
+            continue
+        total_props += 1
+        try:
+            res_int = int(p_det.get("atlas_resolution", 2048) or 2048)
+        except Exception:
+            res_int = 2048
+        one_map_mb = (float(res_int) * float(res_int) * (4.0 / 3.0)) / (1024.0 * 1024.0)
+        total_vram_mb += one_map_mb * 2.0
+        if res_int >= 16384:
+            n_16k += 1
+        elif res_int >= 8192:
+            n_8k += 1
+
+    return {
+        "total_props": total_props,
+        "total_vram_mb": total_vram_mb,
+        "n_8k": n_8k,
+        "n_16k": n_16k,
+        "n_heavy_col": n_heavy_col,
+        "is_heavy": bool(n_8k > 0 or n_16k > 0 or n_heavy_col > 0),
+    }
+
+
 def get_havok_ceiling_status(context, obj: bpy.types.Object | None = None) -> dict:
     """
-    Checks whether a prop in SAME_AS_MESH ('Same as visible mesh') mode exceeds Havok's
-    single-shape 1:1 limits (welded_verts > 2600 or tris > max_col_tris, default 5000).
-
-    Returns a dict with:
-      - exceeds_ceiling: bool
-      - welded_verts: int
-      - raw_verts: int
-      - tris: int
-      - max_verts: int (2600)
-      - max_tris: int (5000 or per-prop max_col_tris)
-      - is_same_as_mesh: bool
-      - reason: str ('none', 'exceeds_verts', 'exceeds_tris', 'exceeds_both')
+    Evaluates skateable collision polygon/vertex budgets and micro-triangle density.
+    Meshes compile 1:1 up to `max_col_tris` (default 100,000); warnings fire above
+    25,000 triangles, > 1,000 tris/m^2 micro-triangle density (when > 5,000 tris),
+    or > 65,535 visual mesh vertices.
     """
     default_res = {
         "exceeds_ceiling": False,
+        "exceeds_verts": False,
+        "high_tris": False,
+        "high_density": False,
         "welded_verts": 0,
         "raw_verts": 0,
         "tris": 0,
-        "max_verts": 2600,
-        "max_tris": 5000,
+        "area_m2": 1.0,
+        "tris_per_m2": 0.0,
+        "max_verts": 65535,
+        "max_tris": 100000,
+        "soft_tri_warn": 25000,
         "is_same_as_mesh": False,
         "reason": "none",
     }
@@ -3708,7 +3891,6 @@ def get_havok_ceiling_status(context, obj: bpy.types.Object | None = None) -> di
 
     me = target_obj.data
 
-    # Fast count extraction (< 0.001ms)
     is_editmode = target_obj.mode == 'EDIT' and getattr(me, "is_editmode", False)
     if is_editmode:
         try:
@@ -3725,13 +3907,12 @@ def get_havok_ceiling_status(context, obj: bpy.types.Object | None = None) -> di
     if raw_verts == 0 or poly_count == 0:
         return default_res
 
-    # Fast collision mode & max triangle lookup (< 0.001ms)
     prop = getattr(getattr(context, "scene", None), "reskate_prop", None) if context else None
     active_obj = getattr(getattr(getattr(context, "view_layer", None), "objects", None), "active", None) if context else None
 
     if active_obj == target_obj and prop is not None:
         col_mode = str(getattr(prop, "collision_mode", "SAME_AS_MESH") or "SAME_AS_MESH").upper()
-        max_col_tris = int(getattr(prop, "max_col_tris", 5000) or 5000)
+        max_col_tris = int(getattr(prop, "max_col_tris", 100000) or 100000)
     else:
         col_mode = target_obj.get("reskate_collision_mode")
         if col_mode is None:
@@ -3746,31 +3927,26 @@ def get_havok_ceiling_status(context, obj: bpy.types.Object | None = None) -> di
                 col_mode = "SAME_AS_MESH"
         else:
             col_mode = str(col_mode).upper()
-        max_col_tris = int(target_obj.get("reskate_max_col_tris", 5000) or 5000)
+        max_col_tris = int(target_obj.get("reskate_max_col_tris", 100000) or 100000)
 
-    max_verts = 2600
+    max_verts = 65535
     max_tris = max_col_tris
+    sx, sy, sz = (abs(float(x)) for x in getattr(target_obj, "scale", (1.0, 1.0, 1.0)))
 
-    # FAST TOP-LEVEL CACHE LOOKUP (< 0.002ms)
-    cache_key = (target_obj.name, raw_verts, poly_count, col_mode, max_verts, max_tris)
+    cache_key = (target_obj.name, raw_verts, poly_count, col_mode, max_verts, max_tris, round(sx, 2), round(sy, 2), round(sz, 2))
     if cache_key in _HAVOK_CEILING_CACHE:
         return _HAVOK_CEILING_CACHE[cache_key]
 
-    # --- SLOW PATH (Cache Miss Only) ---
     actual_target = target_obj
     if is_collision_helper_object(actual_target):
         owner = resolve_collision_to_owner_prop(actual_target)
         if owner is not None and getattr(owner, "type", None) == 'MESH' and getattr(owner, "data", None):
             actual_target = owner
 
-    # Check for resolved custom collision mesh (_COL or explicit pointer)
     col_obj = resolve_custom_collision_object(context, actual_target)
-
-    # Check collision mesh source in state
     obj_state = get_or_init_object_prop_state(actual_target)
     col_mesh_source = str(obj_state.get("collision_mesh_source", "") or target_obj.get("reskate_collision_mesh_source", "") or "")
 
-    # Determine if collision is truly 1:1 same as visible mesh
     is_same_as_mesh = True
     if col_obj is not None:
         is_same_as_mesh = False
@@ -3779,53 +3955,63 @@ def get_havok_ceiling_status(context, obj: bpy.types.Object | None = None) -> di
     elif col_mode not in ('SAME_AS_MESH', 'EXACT_MESH', 'EXACT_1_1'):
         is_same_as_mesh = False
 
-    # Triangle count and welded vertices (skip np.unique when raw_verts <= max_verts)
     if is_editmode:
         try:
             bm = bmesh.from_edit_mesh(me)
             tris = sum(max(1, len(f.verts) - 2) for f in bm.faces)
-            if raw_verts <= max_verts:
-                welded_verts = raw_verts
-            else:
-                v_arr = np.asarray([v.co for v in bm.verts], dtype=np.float32)
-                rounded = np.round(v_arr, 4)
-                welded_verts = int(len(np.unique(rounded, axis=0)))
+            welded_verts = len(bm.verts)
         except Exception:
             tris = max(0, len(me.loops) - 2 * poly_count)
             welded_verts = raw_verts
     else:
         tris = max(0, len(me.loops) - 2 * poly_count)
-        if raw_verts <= max_verts:
-            welded_verts = raw_verts
-        else:
-            v_buf = np.empty(raw_verts * 3, dtype=np.float32)
-            me.vertices.foreach_get("co", v_buf)
-            rounded = np.round(v_buf.reshape(-1, 3), 4)
-            welded_verts = int(len(np.unique(rounded, axis=0)))
+        welded_verts = raw_verts
 
-    if not is_same_as_mesh:
+    eval_obj = actual_target
+    eval_tris = tris
+    is_exact_tri_col = is_same_as_mesh or (col_obj is not None and col_mode in ('CUSTOM_OBJECT', 'AUTHORED_COL', 'CUSTOM_COL'))
+    if col_obj is not None and col_mode in ('CUSTOM_OBJECT', 'AUTHORED_COL', 'CUSTOM_COL') and getattr(col_obj, "data", None):
+        eval_obj = col_obj
+        c_me = col_obj.data
+        eval_tris = max(0, len(c_me.loops) - 2 * len(c_me.polygons))
+
+    area_m2, tris_per_m2 = compute_object_surface_area_and_density(eval_obj, eval_tris)
+
+    if col_mode in ('NO_COLLISION', 'NONE', 'DECAL_ONLY', 'SIMPLE_HULLS', 'CONVEX_HULL', 'AUTO_CONVEX'):
+        high_tris = False
+        high_density = False
+        exceeds_verts = False
         exceeds_ceiling = False
         reason = "none"
     else:
-        v_exceeded = welded_verts > max_verts
-        t_exceeded = tris > max_tris
-        exceeds_ceiling = bool(v_exceeded or t_exceeded)
-        if v_exceeded and t_exceeded:
+        high_tris = is_exact_tri_col and (eval_tris > 25000)
+        high_density = is_exact_tri_col and (eval_tris > 5000 and tris_per_m2 > 1000.0)
+        exceeds_verts = is_same_as_mesh and (welded_verts > max_verts)
+        exceeds_ceiling = bool(high_tris or high_density or exceeds_verts)
+        if exceeds_verts and high_tris:
             reason = "exceeds_both"
-        elif v_exceeded:
+        elif exceeds_verts:
             reason = "exceeds_verts"
-        elif t_exceeded:
-            reason = "exceeds_tris"
+        elif high_tris:
+            reason = "high_tris"
+        elif high_density:
+            reason = "high_density"
         else:
             reason = "none"
 
     result = {
         "exceeds_ceiling": exceeds_ceiling,
+        "exceeds_verts": exceeds_verts,
+        "high_tris": high_tris,
+        "high_density": high_density,
         "welded_verts": welded_verts,
         "raw_verts": raw_verts,
-        "tris": tris,
+        "tris": eval_tris,
+        "area_m2": area_m2,
+        "tris_per_m2": tris_per_m2,
         "max_verts": max_verts,
         "max_tris": max_tris,
+        "soft_tri_warn": 25000,
         "is_same_as_mesh": is_same_as_mesh,
         "reason": reason,
     }
@@ -8680,12 +8866,16 @@ def _extract_slot_inputs_mainthread_generator(
         src_w, src_h = int(ref_img_for_size.size[0]), int(ref_img_for_size.size[1])
         if src_w > 0 and src_h > 0:
             max_src_dim = max(src_w, src_h)
-            max_allowed = 4096 if (target_atlas_res >= 4096 or max_src_dim >= 3072) else (2048 if (target_atlas_res >= 2048 or max_src_dim >= 1536) else 1024)
+            grid_cols = 1 if mats_count <= 1 else (2 if mats_count <= 4 else (3 if mats_count <= 9 else 4))
+            raw_slot_budget = max(1024, int(target_atlas_res) // grid_cols)
+            pot_slot_budget = min(16384, 1 << (raw_slot_budget - 1).bit_length())
+            legacy_floor = 4096 if (mats_count == 1 and max_src_dim >= 3072) else (2048 if max_src_dim >= 1536 else 1024)
+            max_allowed = min(16384, max(legacy_floor, pot_slot_budget))
 
             def _snap_pot_dim(val: int, cap: int) -> int:
                 v = max(64, min(cap, int(val)))
                 best = 64
-                for p in (64, 128, 256, 512, 1024, 2048, 4096):
+                for p in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
                     if p <= cap and abs(v - p) <= abs(v - best):
                         best = p
                 return best
@@ -8696,7 +8886,11 @@ def _extract_slot_inputs_mainthread_generator(
                 slot_h = _snap_pot_dim(int(round(src_h * scale_down)), max_allowed)
                 slot_dim = max(slot_w, slot_h)
             else:
-                if max_src_dim >= 3072 and max_allowed >= 4096 and mats_count == 1:
+                if max_src_dim >= 12288 and max_allowed >= 16384:
+                    slot_dim = 16384
+                elif max_src_dim >= 6144 and max_allowed >= 8192:
+                    slot_dim = 8192
+                elif max_src_dim >= 3072 and max_allowed >= 4096:
                     slot_dim = 4096
                 elif max_src_dim >= 1536 and max_allowed >= 2048:
                     slot_dim = 2048
@@ -9012,6 +9206,100 @@ def _extract_slot_inputs_mainthread_generator(
     }
 
 
+def _dilate_rgb_into_mask_u8(
+    rgb_u8: np.ndarray,
+    invalid_mask: np.ndarray,
+    iterations: int = 16,
+    fallback_rgb: tuple[int, int, int] | None = None,
+) -> np.ndarray:
+    """
+    Fast non-wrapping NumPy frontier propagation: expands valid RGB pixels outward
+    into `invalid_mask` by up to `iterations` rings (~15-25ms on 4K images), and fills
+    any deeper interior pixels with `fallback_rgb` if provided.
+    """
+    if rgb_u8.size == 0 or invalid_mask.size == 0 or not np.any(invalid_mask):
+        return rgb_u8
+    if np.all(invalid_mask):
+        if fallback_rgb is not None:
+            out = rgb_u8.copy()
+            out[:, :] = np.array(fallback_rgb, dtype=np.uint8)
+            return out
+        return rgb_u8
+
+    h, w = invalid_mask.shape
+    out = rgb_u8.copy()
+    rem_inv = invalid_mask.copy()
+    vp = np.pad(rem_inv, 1, mode="constant", constant_values=False)
+    has_inv_nb = (
+        vp[:-2, 1:-1] | vp[2:, 1:-1] | vp[1:-1, :-2] | vp[1:-1, 2:]
+        | vp[:-2, :-2] | vp[:-2, 2:] | vp[2:, :-2] | vp[2:, 2:]
+    )
+    seed_y, seed_x = np.nonzero((~rem_inv) & has_inv_nb)
+
+    for _ in range(max(1, int(iterations))):
+        if seed_y.size == 0:
+            break
+        ny_parts, nx_parts = [], []
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            ny = seed_y + dy
+            nx = seed_x + dx
+            in_b = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
+            if not np.any(in_b):
+                continue
+            ny_b = ny[in_b]
+            nx_b = nx[in_b]
+            sy_b = seed_y[in_b]
+            sx_b = seed_x[in_b]
+            hit = rem_inv[ny_b, nx_b]
+            if np.any(hit):
+                hy = ny_b[hit]
+                hx = nx_b[hit]
+                rem_inv[hy, hx] = False
+                out[hy, hx] = out[sy_b[hit], sx_b[hit]]
+                ny_parts.append(hy)
+                nx_parts.append(hx)
+        if not ny_parts:
+            break
+        seed_y = np.concatenate(ny_parts)
+        seed_x = np.concatenate(nx_parts)
+
+    if fallback_rgb is not None and np.any(rem_inv):
+        out[rem_inv] = np.array(fallback_rgb, dtype=np.uint8)
+    return out
+
+
+def _detect_unbaked_normal_gutter_mask(n_rgba_u8: np.ndarray, check_alpha: bool = True) -> np.ndarray:
+    """
+    Detects unbaked Cycles tangent-space normal gutters `(0, 0, 0)` AND any
+    1-3px anti-aliased darkened transition fringe where the normal vector length
+    collapsed toward `(0, 0, 0)` (`B < 120` or `||n||^2 < 0.75`).
+    """
+    exact_zero = (n_rgba_u8[:, :, 0] < 8) & (n_rgba_u8[:, :, 1] < 8) & (n_rgba_u8[:, :, 2] < 8)
+    if check_alpha and n_rgba_u8.ndim == 3 and n_rgba_u8.shape[2] >= 4:
+        exact_zero = exact_zero | (n_rgba_u8[:, :, 3] < 16)
+    ez_frac = float(exact_zero.mean()) if exact_zero.size > 0 else 0.0
+    if not (0.0 < ez_frac < 0.995):
+        return np.zeros(exact_zero.shape, dtype=bool)
+    fringe = exact_zero.copy()
+    for _ in range(3):
+        vp = np.pad(fringe, 1, mode="constant", constant_values=False)
+        fringe = (
+            fringe
+            | vp[:-2, 1:-1] | vp[2:, 1:-1] | vp[1:-1, :-2] | vp[1:-1, 2:]
+            | vp[:-2, :-2] | vp[:-2, 2:] | vp[2:, :-2] | vp[2:, 2:]
+        )
+    cy, cx = np.nonzero(fringe & (~exact_zero))
+    if cy.size > 0:
+        c_rgb = n_rgba_u8[cy, cx, :3].astype(np.float32) * (2.0 / 255.0) - 1.0
+        c_len_sq = c_rgb[:, 0] * c_rgb[:, 0] + c_rgb[:, 1] * c_rgb[:, 1] + c_rgb[:, 2] * c_rgb[:, 2]
+        aa_bad = (n_rgba_u8[cy, cx, 2] < 120) | (c_len_sq < 0.75)
+        if np.any(aa_bad):
+            out = exact_zero.copy()
+            out[cy[aa_bad], cx[aa_bad]] = True
+            return out
+    return exact_zero
+
+
 def _process_slot_textures_offthread(payload: dict) -> dict:
     """
     Worker-thread ONLY: Performs pure NumPy and PIL operations: Lanczos resizing,
@@ -9164,12 +9452,26 @@ def _process_slot_textures_offthread(payload: dict) -> dict:
         return {}
 
     norm_01_2d = None
+    dead_norm_gutter = None
     has_normal_map = pil_norm is not None
     normal_map_name = str(payload["detached_norm"].get("name", "")) if (payload.get("detached_norm") and has_normal_map) else ""
 
     if pil_norm is not None:
         norm_resized = pil_norm.resize(slot_size, Image.Resampling.LANCZOS).convert("RGBA")
-        norm_01_2d = (np.asarray(norm_resized, dtype=np.float32)[:, :, :3] / 255.0).copy()
+        n_raw_u8 = np.asarray(norm_resized, dtype=np.uint8)
+        dead_n = _detect_unbaked_normal_gutter_mask(n_raw_u8, check_alpha=True)
+        dead_n_frac = float(dead_n.mean()) if dead_n.size > 0 else 0.0
+        if 0.0 < dead_n_frac < 0.995:
+            dead_norm_gutter = dead_n
+            healed_n_rgb = _dilate_rgb_into_mask_u8(
+                n_raw_u8[:, :, :3],
+                dead_n,
+                iterations=20,
+                fallback_rgb=(128, 128, 255),
+            )
+            norm_01_2d = healed_n_rgb.astype(np.float32) / 255.0
+        else:
+            norm_01_2d = (n_raw_u8[:, :, :3].astype(np.float32) / 255.0).copy()
         n_str = payload.get("normal_strength", 1.0)
         if abs(n_str - 1.0) > 1e-3:
             n_xyz = norm_01_2d * 2.0 - 1.0
@@ -9244,6 +9546,17 @@ def _process_slot_textures_offthread(payload: dict) -> dict:
         msk_rgba[:, :, 1] = np.clip(np.round(smooth_2d * 255.0), 0, 255).astype(np.uint8)
     else:
         msk_rgba[:, :, 1] = int(max(0, min(255, round(mat_smoothness * 255.0))))
+    if not payload.get("is_alpha_or_decal_slot", False) and dead_norm_gutter is not None:
+        dead_m = dead_norm_gutter & (msk_rgba[:, :, 0] < 16) & (msk_rgba[:, :, 1] > 235)
+        dead_m_frac = float(dead_m.mean()) if dead_m.size > 0 else 0.0
+        if 0.0 < dead_m_frac < 0.995:
+            fb_m = tuple(int(round(x)) for x in msk_rgba[:, :, :3][~dead_m].mean(axis=0))
+            msk_rgba[:, :, :3] = _dilate_rgb_into_mask_u8(
+                msk_rgba[:, :, :3],
+                dead_m,
+                iterations=20,
+                fallback_rgb=fb_m,
+            )
     slot_msk_path = staging_dir / f"ReSkate_Mat_{prop_slug}_{slot_idx}_msk.png"
     mask_saved = _atomic_png_save(Image.fromarray(msk_rgba, mode="RGBA"), slot_msk_path, compress_level=compress_level, cancel_token=cancel_token)
     if not mask_saved and cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
@@ -9362,9 +9675,29 @@ def _process_slot_textures_offthread(payload: dict) -> dict:
         if has_alpha_transparency and str(alpha_mode).lower() not in ("masked", "clip", "blend"):
             alpha_mode = "masked"
     else:
+        raw_alpha_dead = (rgba_arr[:, :, 3] < 0.06) if has_image_texture else None
         rgba_arr[:, :, 3] = 1.0
         has_alpha_transparency = False
         alpha_mode = "opaque"
+        if has_image_texture:
+            c_u8_tmp = np.clip(np.round(rgba_arr[:, :, :3] * 255.0), 0, 255).astype(np.uint8)
+            dead_c = np.zeros((slot_h, slot_w), dtype=bool)
+            if raw_alpha_dead is not None:
+                ra_frac = float(raw_alpha_dead.mean()) if raw_alpha_dead.size > 0 else 0.0
+                if 0.0 < ra_frac < 0.995:
+                    dead_c |= raw_alpha_dead
+            if dead_norm_gutter is not None:
+                dead_c |= dead_norm_gutter & (np.max(c_u8_tmp[:, :, :3], axis=2) < 64)
+            dc_frac = float(dead_c.mean()) if dead_c.size > 0 else 0.0
+            if 0.0 < dc_frac < 0.995:
+                fb_c = tuple(int(round(x)) for x in c_u8_tmp[~dead_c].mean(axis=0))
+                healed_c = _dilate_rgb_into_mask_u8(
+                    c_u8_tmp,
+                    dead_c,
+                    iterations=20,
+                    fallback_rgb=fb_c,
+                )
+                rgba_arr[:, :, :3] = healed_c.astype(np.float32) / 255.0
 
     msk_g_is_roughness = False
     msk_g_is_curved_smoothness = False
@@ -11032,10 +11365,10 @@ def get_compile_block_reason(context, obj: bpy.types.Object | None = None) -> st
     """
     author = get_author_name(context)
     if not author:
-        return "Set Author Name in Edit → Preferences → Add-ons → ReSkate Prop Studio."
+        return "Set Author Name in Edit → Preferences → Add-ons → ReSkate QuickDrop Studio."
     game_dir = get_game_dir(context)
     if not is_game_dir_valid(game_dir):
-        return "Set a valid Skate Game Folder in Edit → Preferences → Add-ons → ReSkate Prop Studio."
+        return "Set a valid Skate Game Folder in Edit → Preferences → Add-ons → ReSkate QuickDrop Studio."
     cli_st = get_reskate_cli_status(game_dir, context=context)
     if not cli_st.get("ok"):
         return str(cli_st.get("message") or "ReSkate Studio is missing.")
@@ -11512,12 +11845,12 @@ def check_mesh_uv_bounds(obj: bpy.types.Object | None, tolerance: float = 0.02) 
 
 PACK_README_ATTRIBUTION_FOOTER = (
     "\n---\n"
-    f"*Created with [ReSkate Prop Studio]({GITHUB_REPO_URL})*\n"
+    f"*Created with [ReSkate QuickDrop Studio]({GITHUB_REPO_URL})*\n"
 )
 
 
 def ensure_pack_readme_footer(readme_text: str) -> str:
-    """Appends the 'Created with ReSkate Prop Studio' GitHub attribution footer if not already present."""
+    """Appends the 'Created with ReSkate QuickDrop Studio' GitHub attribution footer if not already present."""
     base = str(readme_text or "").rstrip()
     if "github.com/camerontutt/reskate-prop-studio" in base.lower():
         return base + "\n"
@@ -11528,7 +11861,7 @@ def ensure_pack_readme_footer(readme_text: str) -> str:
 
 def generate_pack_readme_markdown(manifest_data: dict) -> str:
     """
-    Auto-generates a Thunderstore & mod-folder `README.md` with pack metadata and the full object list
+    Auto-generates a Thunderstore & mod-folder `README.md` with pack metadata and the full Quick Drop Object (QDO) list
     (including Variant Family groupings when present).
     """
     pack_name = str(manifest_data.get("pack_name") or manifest_data.get("target_mod_name") or "CustomProps").strip()
@@ -11537,7 +11870,7 @@ def generate_pack_readme_markdown(manifest_data: dict) -> str:
     desc = str(
         manifest_data.get("pack_description")
         or manifest_data.get("description")
-        or "Custom skateable props built with ReSkate Prop Studio."
+        or "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio."
     ).strip()
 
     props_list = manifest_data.get("props")
@@ -11565,7 +11898,7 @@ def generate_pack_readme_markdown(manifest_data: dict) -> str:
             fam_suffix = f" *(Variant Family: {fam})*" if fam else ""
             lines.append(f"{idx}. **{d_name}** — `{cat}`{fam_suffix}")
     else:
-        lines.append("- Standalone Quick Drop Prop Pack")
+        lines.append("- Standalone Quick Drop Object (QDO) Pack")
 
     folder_name = pack_name if pack_name.lower().startswith(f"{author.lower()}-") else f"{author}-{pack_name}"
     lines.extend([
@@ -11715,33 +12048,39 @@ def run_preflight_checks(context, obj: bpy.types.Object | None) -> list[dict]:
             "fix_action": None,
         })
 
-    # 6. Triangle count > 20,000 (O(1) exact formula: loops - 2 * polygons)
+    # 6. Triangle count & 1:1 Havok performance/density check
     tri_count = max(0, n_loops - 2 * n_polys) if n_polys > 0 else 0
-    if tri_count > 20000:
-        checks.append({
-            "level": "WARN",
-            "label": f"High triangle count ({tri_count:,} tris > 20,000 budget)",
-            "fix_action": None,
-        })
-    else:
-        checks.append({"level": "OK", "label": f"Triangle budget OK ({tri_count:,} tris)", "fix_action": None})
-
-    # Havok 1:1 single-shape ceiling check
     if not is_no_col_pf:
         h_stat = get_havok_ceiling_status(context, obj)
-        if h_stat.get("exceeds_ceiling"):
+        if h_stat.get("exceeds_verts"):
             checks.append({
                 "level": "WARN",
-                "label": f"Havok 1:1 Ceiling Exceeded ({h_stat['welded_verts']:,}v / {h_stat['tris']:,}t > 2,600 / 5,000) — grind edges may not match",
+                "label": f"Visual mesh vertex limit exceeded ({h_stat['welded_verts']:,} > 65,535) — simplify or use _COL",
+                "fix_action": "GENERATE_SIMPLIFIED_COL",
+                "fix_label": "Simplify",
+            })
+        elif h_stat.get("high_tris") or h_stat.get("high_density"):
+            d_val = int(round(float(h_stat.get("tris_per_m2", 0.0))))
+            if h_stat.get("high_tris") and h_stat.get("high_density"):
+                lbl = f"Heavy/dense collision ({h_stat['tris']:,} tris > 25,000; ~{d_val:,} tris/m²) — may lag skater"
+            elif h_stat.get("high_tris"):
+                lbl = f"High collision triangle count ({h_stat['tris']:,} > 25,000) — compiles 1:1, may lag skater"
+            else:
+                lbl = f"Dense micro-triangles (~{d_val:,} tris/m², {h_stat['tris']:,} tris) — may lag skater"
+            checks.append({
+                "level": "WARN",
+                "label": lbl,
                 "fix_action": "GENERATE_SIMPLIFIED_COL",
                 "fix_label": "Simplify",
             })
         elif h_stat.get("is_same_as_mesh"):
             checks.append({
                 "level": "OK",
-                "label": f"Havok 1:1 Ceiling OK ({h_stat['welded_verts']:,}v / {h_stat['tris']:,}t <= 2,600 / 5,000)",
+                "label": f"1:1 Collision OK ({h_stat['tris']:,} tris <= 25,000 recommended)",
                 "fix_action": None,
             })
+    else:
+        checks.append({"level": "OK", "label": f"Mesh triangles OK ({tri_count:,} tris)", "fix_action": None})
 
     # 7. Thumbnail up-to-date & Variant Corner Notch check
     thumb_outdated, thumb_reason = is_prop_thumbnail_out_of_date(context, obj)
@@ -11996,14 +12335,14 @@ def _build_single_prop_manifest_generator_impl(
     decal_shader_mode = str(
         getattr(prop, "decal_shader_mode", obj_state.get("decal_shader_mode", "CUTOUT_273")) or "CUTOUT_273"
     ).upper() if prop else str(obj_state.get("decal_shader_mode", "CUTOUT_273") or "CUTOUT_273").upper()
-    max_col_tris = (prop.max_col_tris if prop else 5000)
+    max_col_tris = (prop.max_col_tris if prop else 100000)
     coacd_max_hulls = (prop.coacd_max_hulls if prop else 8)
     round_rail = (getattr(prop, "round_rail", False) or getattr(prop, "grind_type", "") == 'ROUND_RAIL') if prop else False
     look_mode = (getattr(prop, "look_mode", "AS_IS") if prop else "AS_IS")
     albedo_tint = [float(v) for v in getattr(prop, "albedo_tint", (1.0, 1.0, 1.0))] if prop else [1.0, 1.0, 1.0]
     enable_custom_textures = (bool(getattr(prop, "enable_custom_textures", True)) if prop else True)
     pack_version = resolve_compile_pack_version(context, target_mod, prop)
-    pack_description = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
+    pack_description = (getattr(prop, "pack_description", "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.") if prop else "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.").strip()
     include_2a = (getattr(prop, "include_2a_variant", False) if prop else False)
     export_fbmod_only = (getattr(prop, "export_fbmod_only", False) if prop else False)
     merge_existing_mod = (bool(getattr(prop, "merge_existing_mod", True)) if prop else True)
@@ -12330,7 +12669,7 @@ def _build_pack_manifest_generator_impl(
     target_mod = get_resolved_target_mod_name(context, target_mod_override=target_mod_override)
     author_name = get_author_name(context) or (str(getattr(prop, "author_name", "") or "").strip() if prop else "") or "ReSkateAuthor"
     pack_version = resolve_compile_pack_version(context, target_mod, prop)
-    pack_description = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
+    pack_description = (getattr(prop, "pack_description", "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.") if prop else "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.").strip()
     raw_mod_icon = str(getattr(prop, "mod_icon_path", "") or "").strip() if prop else ""
     mod_icon_path = str(Path(bpy.path.abspath(raw_mod_icon))) if raw_mod_icon else ""
     raw_mod_readme = str(getattr(prop, "mod_readme_path", "") or "").strip() if prop else ""
@@ -12749,7 +13088,7 @@ def _build_pack_manifest_generator_impl(
             "no_collision_placement_mode": item_no_col_placement,
             "placement_proxy_mode": item_pphys_mode,
             "pphys_target_tris": int(item_pphys_tris),
-            "max_col_tris": int(obj_state.get("max_col_tris", getattr(prop, "max_col_tris", 5000) if prop else 5000) or 5000),
+            "max_col_tris": int(obj_state.get("max_col_tris", getattr(prop, "max_col_tris", 100000) if prop else 100000) or 100000),
             "anti_lip_enabled": bool(item_anti_lip_enabled),
             "anti_lip_sink_m": float(item_anti_lip_sink_m),
             "surface_material_code": int(surf_code),

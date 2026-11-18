@@ -2,9 +2,9 @@
 """
 compile_blender_prop.py
 ================================================================================
-Standalone CLI Compiler for ReSkate Blender 5.3 Skate Prop Studio.
+Standalone CLI Compiler for ReSkate QuickDrop Studio (Blender 5.3).
 Bridges intermediate JSON manifests (single-prop and multi-prop pack queue)
-into genuine Frostbite zero-donor standalone mods (Bundle 39).
+into genuine Frostbite zero-donor standalone Quick Drop Object (QDO) mods (Bundle 39).
 
 Emits structured progress lines on stdout:
   STEP <i/n> <label>
@@ -44,7 +44,7 @@ import site
 import unicodedata
 import zlib
 
-COMPILER_VERSION = "0.33.4"
+COMPILER_VERSION = "1.0.0"
 os.environ["RESKATE_COMPILER_VERSION"] = COMPILER_VERSION
 PIPELINE_MODE = os.environ.get("RESKATE_PIPELINE_MODE", "FAST_OPTIMIZED").strip().upper()
 LOGGED_INPUT_READS: list[str] = []
@@ -421,6 +421,7 @@ except Exception:
 
 import numpy as np
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 
 
 def _get_staging_dir() -> Path:
@@ -1330,10 +1331,10 @@ def load_mesh_geometry_and_submeshes(glb_path: str | Path) -> tuple[np.ndarray, 
     return verts, normals, uvs, faces, submeshes
 
 
-def _snap_to_power_of_two(val: int, min_val: int = 64, max_val: int = 4096) -> int:
+def _snap_to_power_of_two(val: int, min_val: int = 64, max_val: int = 16384) -> int:
     v = max(min_val, min(max_val, int(val)))
     best = min_val
-    for p in (64, 128, 256, 512, 1024, 2048, 4096):
+    for p in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
         if min_val <= p <= max_val and abs(v - p) <= abs(v - best):
             best = p
     return best
@@ -1342,10 +1343,10 @@ def _snap_to_power_of_two(val: int, min_val: int = 64, max_val: int = 4096) -> i
 def _get_bc7_mip_spec(tex_w_or_res: int, tex_h: int | None = None) -> tuple[int, int, int, list[int], int]:
     """
     Returns `(tex_w, tex_h, n_mips, mip_sizes, total_sz)` for any power-of-two BC7 texture chain
-    (square OR rectangular, such as `256x4096`, `512x4096`, `1024x1024`, `2048x2048`, `4096x4096`).
+    (square OR rectangular, such as `256x4096`, `8192x4096`, `4096x4096`, `8192x8192`, `16384x16384`).
     """
-    w = _snap_to_power_of_two(tex_w_or_res, 64, 4096)
-    h = _snap_to_power_of_two(tex_h if tex_h is not None else tex_w_or_res, 64, 4096)
+    w = _snap_to_power_of_two(tex_w_or_res, 64, 16384)
+    h = _snap_to_power_of_two(tex_h if tex_h is not None else tex_w_or_res, 64, 16384)
     n_mips = int(round(math.log2(max(w, h)))) + 1
     mips: list[int] = []
     for m in range(n_mips):
@@ -1368,18 +1369,30 @@ def _get_bc7_mip_spec_from_bytes_len(
             spec = _get_bc7_mip_spec(hw, hh)
             if spec[4] == int(raw_bc7_len):
                 return spec
-    # Exact match against all power-of-two square & rectangular combinations in {64..4096}
-    pots = (1024, 2048, 4096, 512, 256, 128, 64)
+    # Exact match against all power-of-two square & rectangular combinations in {64..16384}
+    pots = (1024, 2048, 4096, 8192, 16384, 512, 256, 128, 64)
     for w in pots:
         for h in pots:
             spec = _get_bc7_mip_spec(w, h)
             if spec[4] == int(raw_bc7_len):
                 return spec
+    if raw_bc7_len >= 300000000:
+        return _get_bc7_mip_spec(16384, 16384)
+    if raw_bc7_len >= 80000000:
+        return _get_bc7_mip_spec(8192, 8192)
     if raw_bc7_len >= 20000000:
         return _get_bc7_mip_spec(4096, 4096)
     if raw_bc7_len >= 5000000:
         return _get_bc7_mip_spec(2048, 2048)
     return _get_bc7_mip_spec(1024, 1024)
+
+
+def _img_sha1_fast(im: Image.Image) -> str:
+    """Computes SHA-1 of a PIL image via zero-copy numpy memoryview where possible."""
+    arr = np.asarray(im, dtype=np.uint8)
+    if not arr.flags["C_CONTIGUOUS"]:
+        arr = np.ascontiguousarray(arr)
+    return hashlib.sha1(memoryview(arr)).hexdigest()
 
 
 def _resolve_submesh_material_entry(sm, idx: int, entries: list) -> tuple[int, dict | None]:
@@ -1412,25 +1425,215 @@ def _resolve_submesh_material_entry(sm, idx: int, entries: list) -> tuple[int, d
     return idx, None
 
 
+def _dilate_rgb_into_mask_u8(
+    rgb_u8: np.ndarray,
+    invalid_mask: np.ndarray,
+    iterations: int = 16,
+    fallback_rgb: tuple[int, int, int] | None = None,
+) -> np.ndarray:
+    """
+    Fast non-wrapping NumPy frontier propagation: expands valid RGB pixels outward
+    into `invalid_mask` by up to `iterations` rings (~15-25ms on 4K images), and fills
+    any deeper interior pixels with `fallback_rgb` if provided.
+    """
+    if rgb_u8.size == 0 or invalid_mask.size == 0 or not np.any(invalid_mask):
+        return rgb_u8
+    if np.all(invalid_mask):
+        if fallback_rgb is not None:
+            out = rgb_u8.copy()
+            out[:, :] = np.array(fallback_rgb, dtype=np.uint8)
+            return out
+        return rgb_u8
+
+    h, w = invalid_mask.shape
+    out = rgb_u8.copy()
+    rem_inv = invalid_mask.copy()
+    vp = np.pad(rem_inv, 1, mode="constant", constant_values=False)
+    has_inv_nb = (
+        vp[:-2, 1:-1] | vp[2:, 1:-1] | vp[1:-1, :-2] | vp[1:-1, 2:]
+        | vp[:-2, :-2] | vp[:-2, 2:] | vp[2:, :-2] | vp[2:, 2:]
+    )
+    seed_y, seed_x = np.nonzero((~rem_inv) & has_inv_nb)
+
+    for _ in range(max(1, int(iterations))):
+        if seed_y.size == 0:
+            break
+        ny_parts, nx_parts = [], []
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            ny = seed_y + dy
+            nx = seed_x + dx
+            in_b = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
+            if not np.any(in_b):
+                continue
+            ny_b = ny[in_b]
+            nx_b = nx[in_b]
+            sy_b = seed_y[in_b]
+            sx_b = seed_x[in_b]
+            hit = rem_inv[ny_b, nx_b]
+            if np.any(hit):
+                hy = ny_b[hit]
+                hx = nx_b[hit]
+                rem_inv[hy, hx] = False
+                out[hy, hx] = out[sy_b[hit], sx_b[hit]]
+                ny_parts.append(hy)
+                nx_parts.append(hx)
+        if not ny_parts:
+            break
+        seed_y = np.concatenate(ny_parts)
+        seed_x = np.concatenate(nx_parts)
+
+    if fallback_rgb is not None and np.any(rem_inv):
+        out[rem_inv] = np.array(fallback_rgb, dtype=np.uint8)
+    return out
+
+
+def _map_bool_mask_nn(mask: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    mh, mw = mask.shape
+    if (mh, mw) == (target_h, target_w):
+        return mask
+    yi = np.clip((np.arange(target_h, dtype=np.int64) * mh) // max(1, target_h), 0, mh - 1)
+    xi = np.clip((np.arange(target_w, dtype=np.int64) * mw) // max(1, target_w), 0, mw - 1)
+    return mask[np.ix_(yi, xi)]
+
+
+def _detect_unbaked_normal_gutter_mask(n_rgba_u8: np.ndarray, check_alpha: bool = False) -> np.ndarray:
+    """
+    Detects unbaked Cycles tangent-space normal gutters `(0, 0, 0)` AND any
+    1-3px anti-aliased darkened transition fringe where the normal vector length
+    collapsed toward `(0, 0, 0)` (`B < 120` or `||n||^2 < 0.75`).
+    """
+    exact_zero = (n_rgba_u8[:, :, 0] < 8) & (n_rgba_u8[:, :, 1] < 8) & (n_rgba_u8[:, :, 2] < 8)
+    if check_alpha and n_rgba_u8.ndim == 3 and n_rgba_u8.shape[2] >= 4:
+        exact_zero = exact_zero | (n_rgba_u8[:, :, 3] < 16)
+    ez_frac = float(exact_zero.mean()) if exact_zero.size > 0 else 0.0
+    if not (0.0 < ez_frac < 0.995):
+        return np.zeros(exact_zero.shape, dtype=bool)
+    fringe = exact_zero.copy()
+    for _ in range(3):
+        vp = np.pad(fringe, 1, mode="constant", constant_values=False)
+        fringe = (
+            fringe
+            | vp[:-2, 1:-1] | vp[2:, 1:-1] | vp[1:-1, :-2] | vp[1:-1, 2:]
+            | vp[:-2, :-2] | vp[:-2, 2:] | vp[2:, :-2] | vp[2:, 2:]
+        )
+    cy, cx = np.nonzero(fringe & (~exact_zero))
+    if cy.size > 0:
+        c_rgb = n_rgba_u8[cy, cx, :3].astype(np.float32) * (2.0 / 255.0) - 1.0
+        c_len_sq = c_rgb[:, 0] * c_rgb[:, 0] + c_rgb[:, 1] * c_rgb[:, 1] + c_rgb[:, 2] * c_rgb[:, 2]
+        aa_bad = (n_rgba_u8[cy, cx, 2] < 120) | (c_len_sq < 0.75)
+        if np.any(aa_bad):
+            out = exact_zero.copy()
+            out[cy[aa_bad], cx[aa_bad]] = True
+            return out
+    return exact_zero
+
+
+def _heal_unbaked_slot_maps(
+    albedo_im: Image.Image | None,
+    norm_im: Image.Image | None,
+    msk_im: Image.Image | None,
+    is_cutout: bool = False,
+    raw_albedo_alpha_gutter: np.ndarray | None = None,
+    dilate_iters: int = 20,
+) -> tuple[Image.Image | None, Image.Image | None, Image.Image | None]:
+    """
+    Repairs unbaked Cycles UV gutters before atlas packing/BC7 mip generation:
+    1) Tangent-space normal maps with impossible near-zero `(0, 0, 0)` background
+       pixels (`(-1, -1, -1)` pointing behind the surface) and 1-3px darkened AA
+       fringe pixels are dilated outward from valid island edges and filled with
+       neutral flat normal `(128, 128, 255)`.
+    2) For opaque slots, matching `(0, 0, 0)`/AA albedo gutters and `(0, 255, 255)`
+       mirror-glossy mask gutters are dilated outward from valid island perimeters.
+    """
+    dead_n = None
+    has_dead_n = False
+    if norm_im is not None:
+        n_arr = np.asarray(norm_im.convert("RGBA"), dtype=np.uint8).copy()
+        dead_n = _detect_unbaked_normal_gutter_mask(n_arr, check_alpha=False)
+        dead_n_frac = float(dead_n.mean()) if dead_n.size > 0 else 0.0
+        if 0.0 < dead_n_frac < 0.995:
+            has_dead_n = True
+            n_arr[:, :, :3] = _dilate_rgb_into_mask_u8(
+                n_arr[:, :, :3],
+                dead_n,
+                iterations=dilate_iters,
+                fallback_rgb=(128, 128, 255),
+            )
+            n_arr[:, :, 3] = 255
+            norm_im = Image.fromarray(n_arr, mode="RGBA")
+
+    if not is_cutout:
+        if albedo_im is not None:
+            c_arr = np.asarray(albedo_im.convert("RGBA"), dtype=np.uint8).copy()
+            ch, cw = c_arr.shape[:2]
+            dead_c = np.zeros((ch, cw), dtype=bool)
+            if has_dead_n and dead_n is not None:
+                dead_n_c = _map_bool_mask_nn(dead_n, ch, cw)
+                dead_c |= dead_n_c & (np.max(c_arr[:, :, :3], axis=2) < 64)
+            if (
+                raw_albedo_alpha_gutter is not None
+                and raw_albedo_alpha_gutter.shape == (ch, cw)
+            ):
+                rag_frac = float(raw_albedo_alpha_gutter.mean()) if raw_albedo_alpha_gutter.size > 0 else 0.0
+                if 0.0 < rag_frac < 0.995:
+                    dead_c |= raw_albedo_alpha_gutter
+            dead_c_frac = float(dead_c.mean()) if dead_c.size > 0 else 0.0
+            if 0.0 < dead_c_frac < 0.995:
+                fb_c = tuple(int(round(x)) for x in c_arr[:, :, :3][~dead_c].mean(axis=0))
+                c_arr[:, :, :3] = _dilate_rgb_into_mask_u8(
+                    c_arr[:, :, :3],
+                    dead_c,
+                    iterations=dilate_iters,
+                    fallback_rgb=fb_c,
+                )
+                c_arr[:, :, 3] = 255
+                albedo_im = Image.fromarray(c_arr, mode="RGBA")
+
+        if msk_im is not None and has_dead_n and dead_n is not None:
+            m_arr = np.asarray(msk_im.convert("RGBA"), dtype=np.uint8).copy()
+            mh, mw = m_arr.shape[:2]
+            dead_n_m = _map_bool_mask_nn(dead_n, mh, mw)
+            dead_m = dead_n_m & (m_arr[:, :, 0] < 16) & (m_arr[:, :, 1] > 235)
+            dead_m_frac = float(dead_m.mean()) if dead_m.size > 0 else 0.0
+            if 0.0 < dead_m_frac < 0.995:
+                fb_m = tuple(int(round(x)) for x in m_arr[:, :, :3][~dead_m].mean(axis=0))
+                m_arr[:, :, :3] = _dilate_rgb_into_mask_u8(
+                    m_arr[:, :, :3],
+                    dead_m,
+                    iterations=dilate_iters,
+                    fallback_rgb=fb_m,
+                )
+                m_arr[:, :, 3] = 255
+                msk_im = Image.fromarray(m_arr, mode="RGBA")
+
+    return albedo_im, norm_im, msk_im
+
+
 def build_multi_material_atlas_safe(
     parts: list[dict],
     atlas_size: int = 1024,
     preserve_alpha: bool = False,
+    atlas_height: int | None = None,
 ) -> tuple[Image.Image, list[np.ndarray]]:
     """
-    Packs 1..N material sub-meshes into a single `atlas_size x atlas_size` RGBA image.
+    Packs 1..N material sub-meshes into a single `atlas_w x atlas_h` RGBA image.
     - When N == 1 (or all parts share the exact same image): returns the single texture and
       leaves the authored UVs 100% untouched (preserving native hardware UV tiling).
-    - When N > 1 with distinct textures/colors: packs each part's texture into a quadrant grid:
+    - When N > 1 with distinct textures/colors: packs each part's texture into a quadrant grid
+      sized to `(inner_w, inner_h)` = `(tile_w - 2*pad_x, tile_h - 2*pad_y)` with edge-replicated
+      perimeter gutters `(pad_x, pad_y)` so remapped UVs sample exact 1:1 texels without shifting
+      or bleeding across adjacent quadrants:
       * Decal overlay slots (`is_decal=True`) are NEVER tiled (`np.tile` is suppressed);
         when `preserve_alpha=True` (Shader 0x273 Cutout), transparent pixels and out-of-[0..1] CLIP
         borders remain transparent (alpha=0) with foreground RGB dilated outward to prevent mip bleeding.
       * Opaque or tiled cutout slots compute true UV span (`u_max_raw - u_min_raw`) and cyclically phase-align (`np.roll`)
         the source image at `(u_min_raw, v_max_raw)` so UV islands crossing 0.0 never inflate `rep_u` or shift.
     """
+    atlas_w = int(atlas_size)
+    atlas_h = int(atlas_height) if atlas_height is not None else atlas_w
     n = len(parts)
     if n == 0:
-        img = Image.new("RGBA", (atlas_size, atlas_size), (185, 185, 185, 255))
+        img = Image.new("RGBA", (atlas_w, atlas_h), (185, 185, 185, 255))
         return img, []
 
     if n == 1:
@@ -1438,15 +1641,15 @@ def build_multi_material_atlas_safe(
         im = p0.get("tex_img")
         if im is None:
             rgb = [int(max(0, min(255, round(c * 255)))) for c in p0.get("avg_rgb", (0.75, 0.75, 0.75))]
-            im = Image.new("RGBA", (atlas_size, atlas_size), (rgb[0], rgb[1], rgb[2], 255))
+            im = Image.new("RGBA", (atlas_w, atlas_h), (rgb[0], rgb[1], rgb[2], 255))
         else:
-            im = im.convert("RGBA").resize((atlas_size, atlas_size), Image.Resampling.LANCZOS)
+            im = im.convert("RGBA").resize((atlas_w, atlas_h), Image.Resampling.LANCZOS)
         return im, [np.asarray(p0["uvs"], dtype=np.float32).copy()]
 
     cols = 2 if n <= 4 else (3 if n <= 9 else 4)
     rows = int(math.ceil(n / cols))
-    tile_w = atlas_size // cols
-    tile_h = atlas_size // rows
+    tile_w = atlas_w // cols
+    tile_h = atlas_h // rows
 
     # Identify primary opaque backing image/color for compositing behind any joined decal slots when preserve_alpha=False
     primary_opaque_im = None
@@ -1461,9 +1664,14 @@ def build_multi_material_atlas_safe(
             c_rgb = [int(max(0, min(255, round(c * 255)))) for c in p_cand.get("avg_rgb", (0.72, 0.72, 0.72))]
             primary_opaque_rgb = (c_rgb[0], c_rgb[1], c_rgb[2], 255)
 
-    atlas = Image.new("RGBA", (atlas_size, atlas_size), primary_opaque_rgb)
+    atlas = Image.new("RGBA", (atlas_w, atlas_h), primary_opaque_rgb)
     remapped_uvs = []
-    pad = max(2, atlas_size // 512)  # Scaled gutter (2px at 1K, 4px at 2K, 8px at 4K) to prevent mip bleeding
+    pad_x = max(2, min(tile_w // 8, atlas_w // 512))  # Scaled gutter (2px at 1K .. 16px at 8K+) to prevent mip bleeding
+    pad_y = max(2, min(tile_h // 8, atlas_h // 512))
+    inner_w = max(1, tile_w - 2 * pad_x)
+    inner_h = max(1, tile_h - 2 * pad_y)
+    pad_r = max(0, tile_w - inner_w - pad_x)
+    pad_b = max(0, tile_h - inner_h - pad_y)
 
     for idx, p in enumerate(parts):
         col = idx % cols
@@ -1489,23 +1697,23 @@ def build_multi_material_atlas_safe(
         if is_decal:
             # Joined Decal Overlay Slot: NEVER tile (`np.tile`)!
             if preserve_alpha:
-                bg_tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+                bg_tile = Image.new("RGBA", (inner_w, inner_h), (0, 0, 0, 0))
             elif backing_im is not None:
-                bg_tile = backing_im.convert("RGBA").resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+                bg_tile = backing_im.convert("RGBA").resize((inner_w, inner_h), Image.Resampling.LANCZOS)
                 bg_arr = np.asarray(bg_tile, dtype=np.uint8).copy()
                 bg_arr[:, :, 3] = 255
                 bg_tile = Image.fromarray(bg_arr, mode="RGBA")
             else:
-                bg_tile = Image.new("RGBA", (tile_w, tile_h), primary_opaque_rgb)
+                bg_tile = Image.new("RGBA", (inner_w, inner_h), primary_opaque_rgb)
 
             if u_min_raw >= -0.02 and u_max_raw <= 1.02 and v_min_raw >= -0.02 and v_max_raw <= 1.02:
                 u_01 = np.clip(uv[:, 0], 0.0, 1.0)
                 v_01 = np.clip(uv[:, 1], 0.0, 1.0)
                 if im is not None:
-                    fg_tile = im.convert("RGBA").resize((tile_w, tile_h), Image.Resampling.LANCZOS)
-                    tile_im = fg_tile if preserve_alpha else Image.alpha_composite(bg_tile, fg_tile)
+                    fg_tile = im.convert("RGBA").resize((inner_w, inner_h), Image.Resampling.LANCZOS)
+                    inner_im = fg_tile if preserve_alpha else Image.alpha_composite(bg_tile, fg_tile)
                 else:
-                    tile_im = bg_tile
+                    inner_im = bg_tile
             else:
                 # UVs extend outside [0..1] (CLIP border padding around the decal on the floating quad)
                 u_lo = min(0.0, u_min_raw)
@@ -1516,24 +1724,24 @@ def build_multi_material_atlas_safe(
                 span_v = max(1e-5, v_hi - v_lo)
                 u_01 = np.clip((uv[:, 0] - u_lo) / span_u, 0.0, 1.0)
                 v_01 = np.clip((uv[:, 1] - v_lo) / span_v, 0.0, 1.0)
-                tile_im = bg_tile.copy()
+                inner_im = bg_tile.copy()
                 if im is not None:
-                    dx0 = int(round(((0.0 - u_lo) / span_u) * tile_w))
-                    dx1 = int(round(((1.0 - u_lo) / span_u) * tile_w))
-                    dy0 = int(round(((v_hi - 1.0) / span_v) * tile_h))
-                    dy1 = int(round(((v_hi - 0.0) / span_v) * tile_h))
+                    dx0 = int(round(((0.0 - u_lo) / span_u) * inner_w))
+                    dx1 = int(round(((1.0 - u_lo) / span_u) * inner_w))
+                    dy0 = int(round(((v_hi - 1.0) / span_v) * inner_h))
+                    dy1 = int(round(((v_hi - 0.0) / span_v) * inner_h))
                     sub_w = max(1, dx1 - dx0)
                     sub_h = max(1, dy1 - dy0)
                     fg_sub = im.convert("RGBA").resize((sub_w, sub_h), Image.Resampling.LANCZOS)
-                    overlay_layer = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+                    overlay_layer = Image.new("RGBA", (inner_w, inner_h), (0, 0, 0, 0))
                     overlay_layer.paste(fg_sub, (dx0, dy0))
-                    tile_im = overlay_layer if preserve_alpha else Image.alpha_composite(tile_im, overlay_layer)
+                    inner_im = overlay_layer if preserve_alpha else Image.alpha_composite(inner_im, overlay_layer)
 
             if not preserve_alpha:
                 # Guarantee 100% opaque alpha in the composited quadrant when not using 0x273 cutout shader
-                t_arr = np.asarray(tile_im, dtype=np.uint8).copy()
+                t_arr = np.asarray(inner_im, dtype=np.uint8).copy()
                 t_arr[:, :, 3] = 255
-                tile_im = Image.fromarray(t_arr, mode="RGBA")
+                inner_im = Image.fromarray(t_arr, mode="RGBA")
         else:
             # Opaque or Tiled Cutout Submesh Slot
             span_u = max(1e-5, u_max_raw - u_min_raw)
@@ -1567,7 +1775,7 @@ def build_multi_material_atlas_safe(
 
             if im is None:
                 rgb = [int(max(0, min(255, round(c * 255)))) for c in p.get("avg_rgb", (0.75, 0.75, 0.75))]
-                tile_im = Image.new("RGBA", (tile_w, tile_h), (rgb[0], rgb[1], rgb[2], 255))
+                inner_im = Image.new("RGBA", (inner_w, inner_h), (rgb[0], rgb[1], rgb[2], 255))
             else:
                 rgba_im = im.convert("RGBA")
                 if abs(phase_u) > 1e-3 or abs(phase_v) > 1e-3:
@@ -1577,43 +1785,39 @@ def build_multi_material_atlas_safe(
                     arr_roll = np.roll(arr_roll, shift=(sy, sx), axis=(0, 1))
                     rgba_im = Image.fromarray(arr_roll, mode="RGBA")
                 if rep_u > 1 or rep_v > 1:
-                    base_step_w = max(64, tile_w // rep_u)
-                    base_step_h = max(64, tile_h // rep_v)
+                    base_step_w = max(64, inner_w // rep_u)
+                    base_step_h = max(64, inner_h // rep_v)
                     sub_tile = rgba_im.resize((base_step_w, base_step_h), Image.Resampling.LANCZOS)
                     tiled_arr = np.tile(np.asarray(sub_tile, dtype=np.uint8), (rep_v, rep_u, 1))
-                    tile_im = Image.fromarray(tiled_arr, mode="RGBA").resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+                    inner_im = Image.fromarray(tiled_arr, mode="RGBA").resize((inner_w, inner_h), Image.Resampling.LANCZOS)
                 else:
-                    tile_im = rgba_im.resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+                    inner_im = rgba_im if rgba_im.size == (inner_w, inner_h) else rgba_im.resize((inner_w, inner_h), Image.Resampling.LANCZOS)
 
         if preserve_alpha and is_cutout:
             # Dilate foreground RGB outward into transparent pixels inside this quadrant so mipmaps never bleed dark borders
-            t_arr = np.asarray(tile_im, dtype=np.uint8).copy()
+            t_arr = np.asarray(inner_im, dtype=np.uint8).copy()
             t_alpha = t_arr[:, :, 3]
             fg_m = t_alpha >= 16
             fg_f = float(fg_m.mean())
             if 0.001 < fg_f < 0.995:
-                valid_m = fg_m.copy()
-                for _ in range(6):
-                    inv_v = ~valid_m
-                    if not np.any(inv_v):
-                        break
-                    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
-                        sh_v = np.roll(np.roll(valid_m, dy, axis=0), dx, axis=1)
-                        sh_rgb = np.roll(np.roll(t_arr[:, :, :3], dy, axis=0), dx, axis=1)
-                        fill = inv_v & sh_v
-                        if np.any(fill):
-                            t_arr[:, :, :3][fill] = sh_rgb[fill]
-                            valid_m[fill] = True
-                            inv_v = ~valid_m
-                tile_im = Image.fromarray(t_arr, mode="RGBA")
+                t_arr[:, :, :3] = _dilate_rgb_into_mask_u8(t_arr[:, :, :3], ~fg_m, iterations=8)
+                inner_im = Image.fromarray(t_arr, mode="RGBA")
+
+        # Replicate inner quadrant edge pixels outward into the (pad_x, pad_y) gutter border
+        inner_arr = np.asarray(inner_im, dtype=np.uint8)
+        if pad_x > 0 or pad_r > 0 or pad_y > 0 or pad_b > 0:
+            padded_arr = np.pad(inner_arr, ((pad_y, pad_b), (pad_x, pad_r), (0, 0)), mode="edge")
+            tile_im = Image.fromarray(padded_arr, mode="RGBA")
+        else:
+            tile_im = inner_im
 
         # Paste quadrant directly into atlas (preserving alpha channel when preserve_alpha=True)
         atlas.paste(tile_im, (x0, y0))
 
-        u_min = (x0 + pad) / float(atlas_size)
-        u_max = (x0 + tile_w - pad) / float(atlas_size)
-        v_top_fb = (y0 + pad) / float(atlas_size)
-        v_bot_fb = (y0 + tile_h - pad) / float(atlas_size)
+        u_min = (x0 + pad_x) / float(atlas_w)
+        u_max = (x0 + pad_x + inner_w) / float(atlas_w)
+        v_top_fb = (y0 + pad_y) / float(atlas_h)
+        v_bot_fb = (y0 + pad_y + inner_h) / float(atlas_h)
         gltf_v_min = 1.0 - v_bot_fb
         gltf_v_max = 1.0 - v_top_fb
 
@@ -2251,7 +2455,7 @@ def decimate_trimesh_fast(
             work_tm.merge_vertices(merge_tex=True, merge_norm=True)
         except Exception:
             pass
-    max_verts_limit = 2600
+    max_verts_limit = max(2600, int(target_faces) + 4096)
     if len(work_tm.faces) <= target_faces and len(work_tm.vertices) <= max_verts_limit:
         return work_tm
     if protected_mask is None or not np.any(protected_mask):
@@ -3166,7 +3370,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
     lights = prop_entry.get("lights", [])
     col_mode = str(prop_entry.get("collision_mode", "SAME_AS_MESH")).upper()
     placement_proxy_mode = str(prop_entry.get("placement_proxy_mode", "MATCH_COLLISION") or "MATCH_COLLISION").upper()
-    max_col_tris = int(prop_entry.get("max_col_tris", 5000))
+    max_col_tris = int(prop_entry.get("max_col_tris", 100000) or 100000)
     max_hulls = int(prop_entry.get("coacd_max_hulls", prop_entry.get("max_hulls", 8)))
     material_surfaces = prop_entry.get("material_surfaces", [])
     material_textures = prop_entry.get("material_textures", [])
@@ -3194,9 +3398,12 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         atlas_res = int(prop_entry.get("atlas_resolution", 1024))
     except Exception:
         atlas_res = 1024
-    if atlas_res not in (1024, 2048, 4096, 8192):
+    if atlas_res not in (1024, 2048, 4096, 8192, 16384):
         atlas_res = 1024
     exp_cfg = prop_entry.get("experimental") if isinstance(prop_entry.get("experimental"), dict) else {}
+    atlas_dims_cfg = prop_entry.get("atlas_dimensions") or exp_cfg.get("atlas_dimensions")
+    has_explicit_atlas_dims = isinstance(atlas_dims_cfg, (list, tuple)) and len(atlas_dims_cfg) == 2
+    bypass_col_decimation = bool(exp_cfg.get("bypass_col_decimation", False))
 
     # 1. Load visual geometry & submeshes
     emit_prop_substep(prop_idx, prop_total, display_name, 1, "Parsing GLB & UVs...")
@@ -3327,12 +3534,20 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             float(uvs[:, 1].max() - uvs[:, 1].min()),
         )
 
-    # Auto-upgrade 1024 -> 2048 (2K) for multi-material props or tiled UVs so multi-slot atlases & rails stay razor-sharp
-    if atlas_res == 1024 and (len(vis_indices) > 1 or max_uv_span > 1.25):
+    # Auto-upgrade 1024 -> 2048 (2K) for multi-material props or tiled UVs unless lock_exact_atlas_res is explicitly enabled
+    if atlas_res == 1024 and not bool(exp_cfg.get("lock_exact_atlas_res", False)) and (len(vis_indices) > 1 or max_uv_span > 1.25):
         target_tex_res = 2048
     else:
-        target_tex_res = 4096 if atlas_res >= 4096 else (2048 if atlas_res >= 2048 else 1024)
-    compose_res = max(target_tex_res, min(8192, atlas_res))
+        target_tex_res = (
+            16384 if atlas_res >= 16384
+            else (8192 if atlas_res >= 8192 else (4096 if atlas_res >= 4096 else (2048 if atlas_res >= 2048 else 1024)))
+        )
+    compose_res = max(target_tex_res, min(16384, atlas_res))
+    if has_explicit_atlas_dims:
+        compose_w = _snap_to_power_of_two(int(atlas_dims_cfg[0]), 64, 16384)
+        compose_h = _snap_to_power_of_two(int(atlas_dims_cfg[1]), 64, 16384)
+    else:
+        compose_w, compose_h = compose_res, compose_res
 
     prop_decal_shader_mode = str(
         prop_entry.get("decal_shader_mode") or exp_cfg.get("decal_shader_mode") or "CUTOUT_273"
@@ -3383,6 +3598,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             part_im = None
             part_norm_im = None
             part_msk_im = None
+            slot_raw_alpha_gutter = None
             part_rgb = (0.72, 0.72, 0.72)
             is_real_image = False
             is_slot_decal = idx in decal_overlay_vis_set
@@ -3416,6 +3632,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
                         elif not is_slot_cutout:
                             # Force opaque alpha on non-cutout slots (e.g. Cycles-baked maps with empty UV gutters)
                             arr_u8 = np.asarray(part_im, dtype=np.uint8).copy()
+                            slot_raw_alpha_gutter = (arr_u8[:, :, 3] < 16)
                             arr_u8[:, :, 3] = 255
                             part_im = Image.fromarray(arr_u8, mode="RGBA")
                         if explicit_has_img is not None:
@@ -3482,6 +3699,13 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
                         and any(abs(float(c) - 1.0) > 1e-3 for c in albedo_tint[:3])
                     )
                     part_rgb = (float(albedo_tint[0]), float(albedo_tint[1]), float(albedo_tint[2])) if has_explicit_tint else emb_rgb
+            part_im, part_norm_im, part_msk_im = _heal_unbaked_slot_maps(
+                part_im,
+                part_norm_im,
+                part_msk_im,
+                is_cutout=bool(is_slot_cutout or is_slot_decal),
+                raw_albedo_alpha_gutter=slot_raw_alpha_gutter,
+            )
             if is_real_image and img_key:
                 distinct_image_keys.add(img_key)
                 if first_real_im is None:
@@ -3537,19 +3761,22 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             or (len(distinct_image_keys) == 0 and len(distinct_finish_keys) >= 2 and not prop_entry.get("use_shared_uv_atlas", False))
         )
         if should_pack_quadrants:
-            atlas_img, remapped_uvs = build_multi_material_atlas_safe(part_specs, compose_res, preserve_alpha=True)
+            if len(part_specs) == 2 and not has_explicit_atlas_dims:
+                compose_w = compose_res
+                compose_h = max(64, _snap_to_power_of_two(compose_res // 2, 64, 16384))
+            atlas_img, remapped_uvs = build_multi_material_atlas_safe(part_specs, compose_w, preserve_alpha=True, atlas_height=compose_h)
             uvs = np.vstack(remapped_uvs)
             if any_slot_has_norm:
-                norm_atlas_img, _ = build_multi_material_atlas_safe(norm_part_specs, compose_res, preserve_alpha=False)
-            msk_atlas_img, _ = build_multi_material_atlas_safe(msk_part_specs, compose_res, preserve_alpha=False)
+                norm_atlas_img, _ = build_multi_material_atlas_safe(norm_part_specs, compose_w, preserve_alpha=False, atlas_height=compose_h)
+            msk_atlas_img, _ = build_multi_material_atlas_safe(msk_part_specs, compose_w, preserve_alpha=False, atlas_height=compose_h)
             if any(p.get("is_cutout", False) for p in part_specs):
                 # Proven Method C (1C): Route PNG Alpha of each cutout/decal quadrant into Red & Alpha of msk_atlas_img
                 # and curve Green as G = (1 - Roughness)^2.2 (so 0% Rough = 255 Shiny, 50% Rough = 55 Satin, 100% Rough = 0 Matte) with Blue = 0!
                 n_p = len(part_specs)
                 q_cols = 2 if n_p <= 4 else (3 if n_p <= 9 else 4)
                 q_rows = int(math.ceil(n_p / q_cols))
-                q_tw = compose_res // q_cols
-                q_th = compose_res // q_rows
+                q_tw = compose_w // q_cols
+                q_th = compose_h // q_rows
                 c_arr_q = np.asarray(atlas_img.convert("RGBA"), dtype=np.uint8)
                 m_arr_q = np.asarray(msk_atlas_img.convert("RGBA"), dtype=np.uint8).copy()
                 for q_i, p_sp in enumerate(part_specs):
@@ -3608,7 +3835,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
                 cls0 = slot_pbr_classes[0]
                 m_u8 = int(max(0, min(255, round(float(cls0["metallic"]) * 255.0))))
                 s_u8 = int(max(0, min(255, round(float(cls0["smoothness"]) * 255.0))))
-                msk_atlas_img = Image.new("RGBA", (target_tex_res, target_tex_res), (m_u8, s_u8, 255, 255))
+                msk_atlas_img = Image.new("RGBA", (compose_w, compose_h), (m_u8, s_u8, 255, 255))
                 chosen_msk_g_is_roughness = False
                 chosen_msk_g_is_curved_smoothness = False
 
@@ -3632,15 +3859,23 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
                 )
                 chosen_rgb = [float(c) for c in albedo_tint[:3]] if has_explicit_tint else emb_rgb
                 rgb_u8 = [int(max(0, min(255, round(c * 255)))) for c in chosen_rgb]
-                atlas_img = Image.new("RGBA", (target_tex_res, target_tex_res), (rgb_u8[0], rgb_u8[1], rgb_u8[2], 255))
+                atlas_img = Image.new("RGBA", (compose_w, compose_h), (rgb_u8[0], rgb_u8[1], rgb_u8[2], 255))
         else:
-            atlas_img = Image.new("RGBA", (target_tex_res, target_tex_res), (180, 180, 180, 255))
+            atlas_img = Image.new("RGBA", (compose_w, compose_h), (180, 180, 180, 255))
 
-    # Determine final power-of-two (width, height): preserve non-square power-of-two aspect ratios (e.g. 256x4096) on single-atlas props
+    # Determine final power-of-two (width, height): preserve non-square power-of-two aspect ratios (e.g. 256x4096, 8192x4096)
     src_aw, src_ah = int(atlas_img.size[0]), int(atlas_img.size[1])
     max_src_a = max(src_aw, src_ah)
-    max_cap_res = max(target_tex_res, 4096 if max_src_a >= 3072 else (2048 if max_src_a >= 1536 else 1024))
-    if not should_pack_quadrants and src_aw != src_ah:
+    max_cap_res = max(
+        target_tex_res,
+        16384 if (max_src_a >= 12288 and target_tex_res >= 16384)
+        else (8192 if (max_src_a >= 6144 and target_tex_res >= 8192)
+              else (4096 if max_src_a >= 3072 else (2048 if max_src_a >= 1536 else 1024))),
+    )
+    if has_explicit_atlas_dims or should_pack_quadrants:
+        target_tex_w = compose_w
+        target_tex_h = compose_h
+    elif not should_pack_quadrants and src_aw != src_ah:
         scale_f = min(1.0, float(max_cap_res) / float(max(1, max_src_a)))
         target_tex_w = _snap_to_power_of_two(int(round(src_aw * scale_f)), 64, max_cap_res)
         target_tex_h = _snap_to_power_of_two(int(round(src_ah * scale_f)), 64, max_cap_res)
@@ -3669,9 +3904,16 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         )
         for mt in material_textures
     )
-    alpha_min_u8 = int(np.asarray(atlas_img.convert("RGBA"), dtype=np.uint8)[:, :, 3].min())
     all_vis_cutout = bool(vis_indices) and all(idx in cutout_vis_set for idx in vis_indices)
     some_vis_cutout = bool(vis_indices) and any(idx in cutout_vis_set for idx in vis_indices) and not all_vis_cutout
+    if not should_pack_quadrants:
+        atlas_img, norm_atlas_img, msk_atlas_img = _heal_unbaked_slot_maps(
+            atlas_img,
+            norm_atlas_img,
+            msk_atlas_img,
+            is_cutout=bool(all_vis_cutout or some_vis_cutout or has_mat_alpha_flag or exp_cfg.get("is_surface_decal", False)),
+        )
+    alpha_min_u8 = int(np.asarray(atlas_img.convert("RGBA"), dtype=np.uint8)[:, :, 3].min())
 
     has_multi_mat_cutout_split = bool(
         len(vis_indices) > 1
@@ -3826,14 +4068,9 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             msk_atlas_img = Image.fromarray(m_arr_osk, mode="RGBA")
 
     # Pack-Level Texture Deduplication: Check pack cache before encoding BC7
-    atlas_bytes = atlas_img.tobytes() if atlas_img is not None else b""
-    atlas_sha = (hashlib.sha1(atlas_bytes).hexdigest() + f"_{tex_w_b39}x{tex_h_b39}") if atlas_bytes else ""
-
-    norm_bytes = norm_atlas_img.tobytes() if norm_atlas_img is not None else b""
-    norm_sha = (hashlib.sha1(norm_bytes).hexdigest() + f"_{tex_w_b39}x{tex_h_b39}") if norm_bytes else ""
-
-    msk_bytes = msk_atlas_img.tobytes() if msk_atlas_img is not None else b""
-    msk_sha = (hashlib.sha1(msk_bytes).hexdigest() + f"_{tex_w_b39}x{tex_h_b39}") if msk_bytes else ""
+    atlas_sha = (_img_sha1_fast(atlas_img) + f"_{tex_w_b39}x{tex_h_b39}") if atlas_img is not None else ""
+    norm_sha = (_img_sha1_fast(norm_atlas_img) + f"_{tex_w_b39}x{tex_h_b39}") if norm_atlas_img is not None else ""
+    msk_sha = (_img_sha1_fast(msk_atlas_img) + f"_{tex_w_b39}x{tex_h_b39}") if msk_atlas_img is not None else ""
 
     tex_bc7_b39 = None
     norm_bc7_b39 = None
@@ -3859,7 +4096,8 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             print(f"  [Texture Dedup] Reused BC7 Mask ({tex_w_b39}x{tex_h_b39}) from pack cache: {msk_sha[:8]}", flush=True)
 
     import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as bc7_pool:
+    bc7_max_workers = 2 if max(tex_w_b39, tex_h_b39) >= 8192 else 5
+    with concurrent.futures.ThreadPoolExecutor(max_workers=bc7_max_workers) as bc7_pool:
         f_tex = bc7_pool.submit(encode_rgba_to_bc7_mipchain, atlas_img, tex_w_b39, tex_h_b39, mip_sizes_b39) if tex_bc7_b39 is None else None
         f_norm = bc7_pool.submit(encode_rgba_to_bc7_mipchain, norm_atlas_img, tex_w_b39, tex_h_b39, mip_sizes_b39) if (norm_atlas_img is not None and norm_bc7_b39 is None) else None
         f_msk = bc7_pool.submit(encode_rgba_to_bc7_mipchain, msk_atlas_img, tex_w_b39, tex_h_b39, mip_sizes_b39) if msk_bc7_b39 is None else None
@@ -4104,11 +4342,11 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
                 col_all_v, col_submeshes, bounds_min, bounds_max, label="custom collision"
             )
         n_col_subs = max(1, min(len(col_submeshes), 12))
-        safe_total_tris = max(500, min(max_col_tris, 10000))
+        safe_total_tris = max(500, min(max_col_tris, 150000))
         slot_max = max(150, safe_total_tris // n_col_subs)
         for idx, c_tm in enumerate(col_submeshes[:n_col_subs]):
             welded_c_tm, prot_c_mask = _weld_and_sharpen_collision_for_grind_paths(c_tm, grind_paths)
-            work_tm = decimate_trimesh_fast(welded_c_tm, slot_max, protected_mask=prot_c_mask)
+            work_tm = welded_c_tm if bypass_col_decimation else decimate_trimesh_fast(welded_c_tm, slot_max, protected_mask=prot_c_mask)
             slot_packed = surface_code
             _, ms_ent = _resolve_submesh_material_entry(c_tm, idx, material_surfaces)
             if ms_ent is not None and ms_ent.get("packed"):
@@ -4153,7 +4391,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
 
     else:
         # Default: SAME_AS_MESH / EXACT_MESH / EXACT_1_1 (or round_rail continuous welded mesh)
-        safe_total_tris = max(500, min(max_col_tris, 10000))
+        safe_total_tris = max(500, min(max_col_tris, 150000))
         active_col_sub_indices = [idx for idx in range(len(submeshes)) if idx in non_decal_vis_indices][:12]
         if len(active_col_sub_indices) > 1 and len(material_surfaces) > 1 and not round_rail:
             n_subs = max(1, len(active_col_sub_indices))
@@ -4161,7 +4399,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
             for idx in active_col_sub_indices:
                 sub_tm = submeshes[idx]
                 welded_sub, prot_sub = _weld_and_sharpen_collision_for_grind_paths(sub_tm, grind_paths)
-                work_tm = decimate_trimesh_fast(welded_sub, slot_max, protected_mask=prot_sub)
+                work_tm = welded_sub if bypass_col_decimation else decimate_trimesh_fast(welded_sub, slot_max, protected_mask=prot_sub)
                 slot_packed = surface_code
                 _, ms_ent = _resolve_submesh_material_entry(sub_tm, idx, material_surfaces)
                 if ms_ent is not None and ms_ent.get("packed"):
@@ -4181,7 +4419,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         else:
             raw_tm = trimesh.Trimesh(vertices=verts, faces=col_auto_faces, process=False)
             welded_tm, prot_mask = _weld_and_sharpen_collision_for_grind_paths(raw_tm, grind_paths)
-            tm_exact = decimate_trimesh_fast(welded_tm, safe_total_tris, protected_mask=prot_mask)
+            tm_exact = welded_tm if bypass_col_decimation else decimate_trimesh_fast(welded_tm, safe_total_tris, protected_mask=prot_mask)
             base_packed = surface_code
             if len(material_surfaces) == 1 and material_surfaces[0].get("surface") not in (None, "DEFAULT") and material_surfaces[0].get("packed"):
                 base_packed = int(material_surfaces[0]["packed"])
@@ -4273,7 +4511,7 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
     try:
         compiled_phys_bytes, compiled_shape_cnt = compile_multishape_havok_via_cli(
             all_col_shapes,
-            max_faces_per_hull=50000 if force_exact_flag else 48,
+            max_faces_per_hull=500000 if (force_exact_flag or bypass_col_decimation) else 48,
             force_exact_triangle_mesh=force_exact_flag,
         )
     except Exception as ex:
@@ -4477,13 +4715,30 @@ def preprocess_prop_manifest_entry(prop_entry: dict, tpl: dict, prop_idx: int = 
         for s in all_col_shapes
         if s.get("mesh") is not None and hasattr(s["mesh"], "faces")
     )
+    total_col_area_m2 = max(
+        0.01,
+        sum(
+            float(s["mesh"].area)
+            for s in all_col_shapes
+            if s.get("mesh") is not None and hasattr(s["mesh"], "area")
+        ),
+    )
+    col_density = float(col_tri_cnt) / total_col_area_m2
     if min_thick_m < 0.025:
         col_warnings.append(
             f"Too thin: minimum thickness is {min_thick_m * 100.0:.1f} cm (< 2.5 cm); Havok collision may pad thin geometry."
         )
-    if raw_tri_cnt > int(max_col_tris):
+    if raw_tri_cnt > int(max_col_tris) and col_tri_cnt < raw_tri_cnt:
         col_warnings.append(
             f"Too many triangles: mesh has {raw_tri_cnt:,} triangles (> {int(max_col_tris):,} budget); collision was decimated to {col_tri_cnt:,} triangles."
+        )
+    if col_tri_cnt > 25000:
+        col_warnings.append(
+            f"High triangle count ({col_tri_cnt:,} > 25,000 recommended): compiles 1:1, but may cause skater trajectory lag."
+        )
+    if col_tri_cnt > 5000 and col_density > 1000.0:
+        col_warnings.append(
+            f"Dense micro-triangles (~{int(round(col_density)):,} tris/m²): tightly packed faces on a small surface may slow skater trajectory prediction."
         )
     raw_total_shapes = len(base_col_shapes) + len(grind_col_shapes)
     pphys_hull_cnt = len(auto_8hull_parts) if use_b94_8hull_pphys else 1
@@ -5061,9 +5316,9 @@ def compile_blender_props_package(
         else f"Standard standalone Bundle 39 build ({mod_name})"
     )
     pack_desc = str(meta.get("description", "")).strip() or (
-        f"ReSkate Prop Studio standalone prop pack ({mod_name} v{pack_version}, built with compiler {compiler_version_stamp})"
+        f"ReSkate QuickDrop Studio standalone QDO pack ({mod_name} v{pack_version}, built with compiler {compiler_version_stamp})"
         if coexist_mode
-        else f"ReSkate Blender Prop Studio Authored Mod ({mod_name})"
+        else f"ReSkate QuickDrop Studio Authored QDO Mod ({mod_name})"
     )
     deploy_to_mods = bool(meta.get("deploy_to_mods", coexist_mode))
     raw_pack_slug = str(meta.get("pack_slug") or coexist_namespace).lower()
@@ -5088,7 +5343,7 @@ def compile_blender_props_package(
         noble_effect_ebx = rpf.get_light_ebp_struct_bytes()
 
     print("\n" + "=" * 80, flush=True)
-    print(f"COMPILING RESKATE BLENDER PROPS SUITE (COMPILER {compiler_version_stamp}): {mod_name} (pack {pack_version})", flush=True)
+    print(f"COMPILING RESKATE QUICKDROP STUDIO PACK (COMPILER {compiler_version_stamp}): {mod_name} (pack {pack_version})", flush=True)
     print(f"Props: {len(cached_props)} | Category: {category_name} | Coexist Mode: {coexist_mode} | 2A Companion: {include_exact_2a_set}", flush=True)
     print(f"Staging: {staging_dir}", flush=True)
     print("=" * 80, flush=True)
@@ -6404,12 +6659,12 @@ def compile_blender_props_package(
             "author": ts_safe_author,
             "version_number": pack_version,
             "website_url": "",
-            "description": (pack_desc or "Custom skateable props built with ReSkate Prop Studio")[:250],
+            "description": (pack_desc or "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio")[:250],
             "dependencies": [],
         }
         build_data = {
             "schema": 1,
-            "tool": f"ReSkate Prop Studio Standalone CLI Compiler {compiler_version_stamp}",
+            "tool": f"ReSkate QuickDrop Studio Standalone CLI Compiler {compiler_version_stamp}",
             "version": compiler_version_stamp,
             "compiler_version": compiler_version_stamp,
             "addon_version": addon_version,
@@ -6566,7 +6821,7 @@ def compile_blender_props_package(
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 readme_src_str = str(meta.get("mod_readme_path") or "").strip()
-                footer_md = "\n---\n*Created with [ReSkate Prop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*\n"
+                footer_md = "\n---\n*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*\n"
                 if readme_src_str and Path(readme_src_str).is_file():
                     raw_rm = Path(readme_src_str).read_text(encoding="utf-8", errors="replace").rstrip()
                     if "github.com/camerontutt/reskate-prop-studio" not in raw_rm.lower():
@@ -6604,7 +6859,7 @@ def compile_blender_props_package(
                     "2. Launch Skate. and open the Quick Drop Object Browser.",
                     "",
                     "---",
-                    "*Created with [ReSkate Prop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*",
+                    "*Created with [ReSkate QuickDrop Studio](https://github.com/CameronTutt/ReSkate-Prop-Studio)*",
                     "",
                 ])
                 (dest_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
@@ -7064,15 +7319,17 @@ def _decompress_cas_payload(raw: bytes) -> bytes:
     cur = 0
     while cur + 8 <= len(raw):
         u_sz, fl_b, c_sz = struct.unpack_from(">IHH", raw, cur)
+        is_raw = fl_b in (0x0070, 0x0000, 0x0071) or u_sz == c_sz
+        act_sz = u_sz if fl_b in (0x0070, 0x0000, 0x0071) else c_sz
         cur += 8
-        comp_data = raw[cur : cur + c_sz]
-        cur += c_sz
-        if fl_b in (0x0070, 0x0000) or u_sz == c_sz:
+        comp_data = raw[cur : cur + act_sz]
+        cur += act_sz
+        if is_raw:
             out.extend(comp_data)
         else:
             out_buf = ctypes.create_string_buffer(u_sz)
             ret = oodle.OodleLZ_Decompress(
-                comp_data, c_sz, out_buf, u_sz, 1, 1, 0, None, 0, None, None, None, 0, 3
+                comp_data, act_sz, out_buf, u_sz, 1, 1, 0, None, 0, None, None, None, 0, 3
             )
             if ret <= 0:
                 raise RuntimeError(f"Oodle decompression failed: ret={ret}")
@@ -8165,8 +8422,8 @@ def _load_templates_cached(staging_root_dir: Path, fast_mode: bool = True) -> tu
 def main():
     global PIPELINE_MODE
     t_compile_start = time.perf_counter()
-    print(f"=== ReSkate Prop Studio Standalone Compiler v{COMPILER_VERSION} ===", flush=True)
-    parser = argparse.ArgumentParser(description="ReSkate Blender Prop Studio Standalone CLI Compiler")
+    print(f"=== ReSkate QuickDrop Studio Standalone Compiler v{COMPILER_VERSION} ===", flush=True)
+    parser = argparse.ArgumentParser(description="ReSkate QuickDrop Studio Standalone CLI Compiler")
     parser.add_argument("manifest_pos", nargs="?", default=None, help="Path to prop_manifest.json or pack_manifest.json")
     parser.add_argument("--manifest", dest="manifest_flag", default=None, help="Path to single prop_manifest.json")
     parser.add_argument("--pack-manifest", dest="pack_manifest", default=None, help="Path to multi-prop pack_manifest.json")
@@ -8353,7 +8610,7 @@ def main():
 
         def _compute_prop_cache_key(pe: dict) -> str:
             h = hashlib.sha256()
-            h.update(f"compiler:{COMPILER_VERSION}|gamedir:{GAME_DIR}|schema:v29_0_method_c_decal_content_sha1|".encode("utf-8"))
+            h.update(f"compiler:{COMPILER_VERSION}|gamedir:{GAME_DIR}|schema:v34_2_exact_quadrant_pad_cycles_gutter_aa_fringe|".encode("utf-8"))
             key_fields = {}
             for k, v in pe.items():
                 if k in _VOLATILE_PATH_KEYS:
@@ -8480,7 +8737,11 @@ def main():
             emit_progress(pct, f"Processing [{idx + 1}/{n_props}] {dname}...")
             cached_props[idx] = _safe_preprocess_prop(idx)
         elif len(miss_indices) > 1:
-            max_w = min(max(6, os.cpu_count() or 8) if compiler_backend == "GPU_EXP" else 4, len(miss_indices))
+            has_ultra_hi_res = any(int(props_list[i].get("atlas_resolution", 0) or 0) >= 8192 for i in miss_indices)
+            if has_ultra_hi_res:
+                max_w = 1
+            else:
+                max_w = min(max(6, os.cpu_count() or 8) if compiler_backend == "GPU_EXP" else 4, len(miss_indices))
             emit_progress(22, f"Compiling {len(miss_indices)} modified props in parallel ({max_w} workers, {compiler_backend})...")
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as prop_pool:
                 fut_map = {
@@ -8534,7 +8795,7 @@ def main():
                 flush=True,
             )
             print(
-                f"[SUCCESS] ReSkate Prop Mod compiled successfully in {total_elapsed_s:.2f}s "
+                f"[SUCCESS] ReSkate QuickDrop Object (QDO) mod compiled successfully in {total_elapsed_s:.2f}s "
                 f"[Mode: {mode_short}, Cache Hits: {cache_hit_count}/{n_props}]: {out_fbmod}",
                 flush=True,
             )

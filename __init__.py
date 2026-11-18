@@ -1,20 +1,20 @@
 """
-ReSkate Prop Studio — Open-Source Skate. Prop Authoring Plugin & Compiler Bridge
+ReSkate QuickDrop Studio — Open-Source Skate. Quick Drop Object (QDO) Authoring Plugin & Compiler Bridge
 Package: sk8_prop_authoring_addon
 License: MIT / GPL-3.0-or-later (Open Source)
 """
 
 from __future__ import annotations
 
-ADDON_VERSION = "0.33.4"
+ADDON_VERSION = "1.0.0"
 
 bl_info = {
-    "name": "ReSkate Prop Studio",
+    "name": "ReSkate QuickDrop Studio",
     "author": "Crem",
-    "version": (0, 33, 4),
+    "version": (1, 0, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar (N) > ReSkate Prop",
-    "description": "Open-Source Zero-Donor Skate. Prop Authoring, Havok Collision, Grind Visualizer, PBR/Cutout Shaders & Dynamic Lights for ReSkate",
+    "location": "View3D > Sidebar (N) > ReSkate QuickDrop",
+    "description": "Open-Source Zero-Donor Skate. Quick Drop Object (QDO) Authoring, 1:1 Havok Skate & Grind Physics, PBR/Cutout Shaders & Dynamic Lights for ReSkate",
     "doc_url": "https://github.com/CameronTutt/ReSkate-Prop-Studio",
     "category": "3D View",
 }

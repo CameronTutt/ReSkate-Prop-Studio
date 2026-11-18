@@ -1,6 +1,6 @@
 """
-ReSkate Prop Studio - operators.py
-Core functional operator backend for Blender 5.3 Beta implementing the 7-Step Checklist:
+ReSkate QuickDrop Studio - operators.py
+Core functional operator backend for Blender 5.3 Beta implementing the 7-Step Quick Drop Object (QDO) Checklist:
   1. Setup: set_origin, place_on_ground_world_center, toggle_skater_ref, toggle_skateboard_ref
   2. Collision: toggle_col_preview, generate_authored_col, create_simplified_col_copy, sync_material_surfaces, trim_bottom_lip
   3. Grind: autodetect_grind_edges, add_grind_path_from_selection, remove_grind_path, clear_grind_paths, mark_grind_edge, clear_grind_edge, clear_all_grind_edges, generate_grind_tube_proxy
@@ -4161,8 +4161,11 @@ class RESKATE_OT_bake_uv_atlas(bpy.types.Operator):
         obj.select_set(True)
 
         prop = getattr(context.scene, "reskate_prop", None)
-        resolution_str = str(getattr(prop, "atlas_resolution", '1024') or '1024')
-        resolution = 4096 if resolution_str == '4096' else (2048 if resolution_str == '2048' else 1024)
+        resolution_str = str(getattr(prop, "atlas_resolution", '2048') or '2048')
+        try:
+            resolution = max(1024, min(16384, int(resolution_str)))
+        except ValueError:
+            resolution = 2048
         island_margin = getattr(prop, "island_margin", 0.015)
         slug = get_prop_slug(context, obj)
 
@@ -7038,7 +7041,7 @@ def _extract_concise_error_summary(log_lines: list[str], ret_code: int) -> str:
             clean = s[6:].strip() if s.startswith("ERROR ") else s
             summary = clean[:160]
             break
-    return f"{summary} Full log: Edit → Preferences → Add-ons → ReSkate Prop Studio."
+    return f"{summary} Full log: Edit → Preferences → Add-ons → ReSkate QuickDrop Studio."
 
 
 def _parse_compiler_output_line(prop, line: str, log_lines: list[str]):
@@ -7152,7 +7155,7 @@ def _start_async_or_sync_compile(op_self, context, manifest_path: Path, is_pack:
             env=compiler_bridge.build_compiler_env(context),
         )
     except Exception as ex:
-        one_line = f"Failed to launch compiler: {ex}. Full log: Edit → Preferences → Add-ons → ReSkate Prop Studio."
+        one_line = f"Failed to launch compiler: {ex}. Full log: Edit → Preferences → Add-ons → ReSkate QuickDrop Studio."
         if prop:
             prop.is_compiling = False
             prop.compile_has_error = True
@@ -7394,10 +7397,10 @@ def _handle_compile_or_prep_modal(op_self, context, event):
 
 
 class RESKATE_OT_compile_and_deploy(bpy.types.Operator):
-    """Exports the active prop (or all selected props) and compiles into a standalone ReSkate Quick Drop mod"""
+    """Exports the active prop (or all selected props) and compiles into a standalone ReSkate Quick Drop Object (QDO) mod"""
     bl_idname = "reskate.compile_and_deploy"
     bl_label = "Compile and Deploy This Prop"
-    bl_description = "Exports the selected mesh(es), collision, textures, lights, and thumbnails, then compiles and deploys the prop pack"
+    bl_description = "Exports the selected mesh(es), collision, textures, lights, and thumbnails, then compiles and deploys the Quick Drop Object (QDO) pack"
     bl_options = {'REGISTER'}
 
     merge_existing: BoolProperty(
@@ -8335,7 +8338,7 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         author_raw = compiler_bridge.get_author_name(context) or "Author"
         author = re.sub(r"[^a-zA-Z0-9_]+", "_", author_raw).strip("_") or "Author"
         version = compiler_bridge.normalize_semver(getattr(prop, "pack_version", "0.1.0") if prop else "0.1.0")
-        desc = (getattr(prop, "pack_description", "Standalone Quick Drop Prop Pack") if prop else "Standalone Quick Drop Prop Pack").strip()
+        desc = (getattr(prop, "pack_description", "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.") if prop else "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.").strip()
         auto_bump = bool(getattr(prop, "auto_bump_pack_version", True)) if prop else True
 
         staging_dir = compiler_bridge.get_staging_dir(context)
@@ -8382,7 +8385,7 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
             "author": author,
             "version_number": version,
             "website_url": "",
-            "description": (desc or "Custom skateable props built with ReSkate Prop Studio")[:250],
+            "description": (desc or "Custom skateable Quick Drop Objects (QDOs) built with ReSkate QuickDrop Studio.")[:250],
             "dependencies": [],
         }
 
@@ -8458,7 +8461,7 @@ class RESKATE_OT_export_thunderstore_zip(bpy.types.Operator):
         prop_summary = f" ({len(prop_names)} prop(s): {', '.join(prop_names[:8])}{'...' if len(prop_names) > 8 else ''})" if prop_names else ""
         new_sec_lines = [
             f"## [{version}] - {time.strftime('%Y-%m-%d')}",
-            f"- Packaged with ReSkate Prop Studio v{compiler_bridge.ADDON_VERSION}{prop_summary}.",
+            f"- Packaged with ReSkate QuickDrop Studio v{compiler_bridge.ADDON_VERSION}{prop_summary}.",
         ]
         all_cl_blocks = ["\n".join(new_sec_lines)] + older_sections
         changelog_text = "# Changelog\n\n" + "\n\n".join(all_cl_blocks) + "\n"
@@ -8980,6 +8983,7 @@ class RESKATE_OT_copy_settings_to_selected(bpy.types.Operator):
             "metallic_map_mix",
             "albedo_tint",
             "look_mode",
+            "atlas_resolution",
             "enable_custom_textures",
         )
 
@@ -8997,7 +9001,11 @@ class RESKATE_OT_copy_settings_to_selected(bpy.types.Operator):
         for dst_obj in targets:
             dst_state = dict(get_or_init_object_prop_state(dst_obj))
             if do_col:
-                keys_to_copy = ("primary_surface", "surface_material_code", "use_full_surface_catalog", "full_surface_catalog") if mode == "SURFACES" else col_keys
+                keys_to_copy = (
+                    ("primary_surface", "surface_material_code", "use_full_surface_catalog", "full_surface_catalog", "atlas_resolution")
+                    if mode == "SURFACES"
+                    else col_keys
+                )
                 for k in keys_to_copy:
                     if k in src_state:
                         dst_state[k] = src_state[k]
@@ -11249,13 +11257,13 @@ class RESKATE_OT_install_python_deps(bpy.types.Operator):
 
 
 class RESKATE_OT_bake_procedural_materials(bpy.types.Operator):
-    """1-click Cycles baker that evaluates any procedural/node-graph material (Sanctus Library, Multiply/AO nodes, NodeGroups) and populates Prop Studio's Base Color, Roughness, Metallic, and Normal texture slots"""
+    """1-click Cycles baker that evaluates any procedural/node-graph material (Sanctus Library, Multiply/AO nodes, NodeGroups) and populates QuickDrop Studio's Base Color, Roughness, Metallic, and Normal texture slots"""
     bl_idname = "reskate.bake_procedural_materials"
     bl_label = "Bake Procedural / Node Materials (Cycles)"
     bl_description = (
         "Switches temporarily to Cycles, bakes Base Color (including Multiply/AO/NodeGroups), Roughness, "
         "Metallic, and Normal into 100% opaque PNG textures on the mesh's existing UV map, and assigns them "
-        "directly into Prop Studio's Material Texture Slots"
+        "directly into QuickDrop Studio's Material Texture Slots"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -11294,7 +11302,7 @@ class RESKATE_OT_bake_procedural_materials(bpy.types.Operator):
         prop = getattr(context.scene, "reskate_prop", None)
         res_str = str(getattr(prop, "atlas_resolution", "2048") or "2048")
         try:
-            resolution = max(512, min(4096, int(res_str)))
+            resolution = max(512, min(16384, int(res_str)))
         except ValueError:
             resolution = 2048
 
@@ -11586,7 +11594,7 @@ class RESKATE_OT_bake_procedural_materials(bpy.types.Operator):
                     if prev_act_node and prev_act_node.name in nodes:
                         nodes.active = prev_act_node
 
-                # Assign baked maps directly to Prop Studio's Texture Slots (`sk8_material` & `reskate_mat`) with override enabled!
+                # Assign baked maps directly to QuickDrop Studio's Texture Slots (`sk8_material` & `reskate_mat`) with override enabled!
                 for holder in (getattr(mat, "sk8_material", None), getattr(mat, "reskate_mat", None)):
                     if holder is None:
                         continue
@@ -11631,7 +11639,7 @@ class RESKATE_OT_bake_procedural_materials(bpy.types.Operator):
         elapsed = time.time() - start_t
         self.report(
             {'INFO'},
-            f"ReSkate: Baked {baked_count} material slot(s) ({resolution}x{resolution} Base Color, Roughness, Metallic, Normal) into Prop Studio texture slots in {elapsed:.1f}s.",
+            f"ReSkate: Baked {baked_count} material slot(s) ({resolution}x{resolution} Base Color, Roughness, Metallic, Normal) into QuickDrop Studio texture slots in {elapsed:.1f}s.",
         )
         return {'FINISHED'}
 
@@ -11726,10 +11734,10 @@ class RESKATE_OT_send_to_game(bpy.types.Operator):
 
 
 class RESKATE_OT_open_addon_preferences(bpy.types.Operator):
-    """Opens Blender Preferences directly to the ReSkate Prop Studio Add-on settings"""
+    """Opens Blender Preferences directly to the ReSkate QuickDrop Studio Add-on settings"""
     bl_idname = "reskate.open_addon_preferences"
     bl_label = "Open ReSkate Add-on Preferences"
-    bl_description = "Opens Blender Preferences directly to ReSkate Prop Studio where you can configure Author Name, Skate. Game Folder, Staging Folder, and compiler settings"
+    bl_description = "Opens Blender Preferences directly to ReSkate QuickDrop Studio where you can configure Author Name, Skate. Game Folder, Staging Folder, and compiler settings"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -11747,7 +11755,7 @@ class RESKATE_OT_open_addon_preferences(bpy.types.Operator):
             bpy.ops.preferences.addon_show(module=mod_name)
         except Exception:
             pass
-        self.report({'INFO'}, "ReSkate: Opened Add-on Preferences (Edit -> Preferences -> Add-ons -> ReSkate Prop Studio).")
+        self.report({'INFO'}, "ReSkate: Opened Add-on Preferences (Edit -> Preferences -> Add-ons -> ReSkate QuickDrop Studio).")
         return {'FINISHED'}
 
 
@@ -12180,10 +12188,16 @@ class RESKATE_OT_check_collision(bpy.types.Operator):
                 warnings_list.append(
                     "Multi-step / spiral staircase geometry detected in Simple Hulls — use Same as Mesh so convex hulls do not bridge across concave steps."
                 )
-            if col_mode == 'SAME_AS_MESH' and col_tris > 8000:
-                warnings_list.append(
-                    f"Too many triangles ({col_tris:,} > 8,000 in Same as Mesh) — switch to Simple Hulls or decimate."
-                )
+            if col_mode in ('SAME_AS_MESH', 'EXACT_MESH', 'EXACT_1_1', 'CUSTOM_OBJECT', 'AUTHORED_COL', 'CUSTOM_COL'):
+                if col_tris > 25000:
+                    warnings_list.append(
+                        f"High triangle count ({col_tris:,} > 25,000 recommended) — compiles 1:1, but may cause skater trajectory lag."
+                    )
+                _area_m2, _tris_per_m2 = compiler_bridge.compute_object_surface_area_and_density(col_obj or obj, col_tris)
+                if col_tris > 5000 and _tris_per_m2 > 1000.0:
+                    warnings_list.append(
+                        f"Dense micro-triangles (~{int(round(_tris_per_m2)):,} tris/m²) — tightly packed faces may slow skater trajectory prediction."
+                    )
             if col_mode in ('SIMPLE_HULLS', 'CONVEX_HULL', 'AUTO_CONVEX') and shape_count >= max_hulls and eval_tris > 500:
                 warnings_list.append(
                     f"Using {shape_count}/{max_hulls} convex hulls — use Custom Object collision if concave pockets need tighter fit."
@@ -12487,10 +12501,10 @@ class RESKATE_OT_copy_compiler_log(bpy.types.Operator):
 
 
 class RESKATE_OT_check_for_updates(bpy.types.Operator):
-    """Checks GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio) for a newer version of ReSkate Prop Studio"""
+    """Checks GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio) for a newer version of ReSkate QuickDrop Studio"""
     bl_idname = "reskate.check_for_updates"
     bl_label = "Check for Updates"
-    bl_description = "Queries GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio/releases) to check if a newer version of ReSkate Prop Studio is available"
+    bl_description = "Queries GitHub Releases (https://github.com/CameronTutt/ReSkate-Prop-Studio/releases) to check if a newer version of ReSkate QuickDrop Studio is available"
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -12506,7 +12520,7 @@ class RESKATE_OT_check_for_updates(bpy.types.Operator):
         try:
             req = urllib.request.Request(
                 api_url,
-                headers={"User-Agent": f"ReSkatePropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
+                headers={"User-Agent": f"ReSkateQuickDropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
             )
             with urllib.request.urlopen(req, timeout=4.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -12648,10 +12662,10 @@ def _perform_live_addon_reload_and_restore(snapshot: dict, new_ver_str: str) -> 
 
 
 class RESKATE_OT_auto_install_update(bpy.types.Operator):
-    """Downloads the latest ReSkate Prop Studio release from GitHub, verifies archive integrity, backs up your scene, and updates in 1 click without losing any work"""
+    """Downloads the latest ReSkate QuickDrop Studio release from GitHub, verifies archive integrity, backs up your scene, and updates in 1 click without losing any work"""
     bl_idname = "reskate.auto_install_update"
     bl_label = "1-Click Update & Reload"
-    bl_description = "Safely downloads and installs the latest ReSkate Prop Studio update in-place while preserving all scene props, settings, and preferences"
+    bl_description = "Safely downloads and installs the latest ReSkate QuickDrop Studio update in-place while preserving all scene Quick Drop Objects (QDOs), settings, and preferences"
     bl_options = {'REGISTER'}
 
     def invoke(self, context, event):
@@ -12664,7 +12678,7 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
         tag = str(getattr(compiler_bridge, "_SESSION_UPDATE_AVAILABLE_TAG", "") or "latest")
         cur_v = str(getattr(compiler_bridge, "ADDON_VERSION_STR", "") or "")
         col = layout.column(align=True)
-        col.label(text=f"Install ReSkate Prop Studio v{tag} now? (Current: v{cur_v})", icon='IMPORT')
+        col.label(text=f"Install ReSkate QuickDrop Studio v{tag} now? (Current: v{cur_v})", icon='IMPORT')
         col.separator()
         box = col.box()
         b_col = box.column(align=True)
@@ -12698,7 +12712,7 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
 
         with tempfile.TemporaryDirectory(prefix="reskate_auto_update_") as tmp_str:
             tmp_dir = Path(tmp_str)
-            tmp_zip = tmp_dir / "reskate_prop_studio_addon.zip"
+            tmp_zip = tmp_dir / "reskate_quickdrop_studio_addon.zip"
 
             # 2. Download or copy update .zip into isolated temp dir
             try:
@@ -12708,7 +12722,7 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                     if not zip_url:
                         req_meta = urllib.request.Request(
                             api_url,
-                            headers={"User-Agent": f"ReSkatePropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
+                            headers={"User-Agent": f"ReSkateQuickDropStudio/{current_ver}", "Accept": "application/vnd.github+json"},
                         )
                         with urllib.request.urlopen(req_meta, timeout=10.0) as resp:
                             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -12717,7 +12731,7 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
 
                     req_dl = urllib.request.Request(
                         zip_url,
-                        headers={"User-Agent": f"ReSkatePropStudio/{current_ver}"},
+                        headers={"User-Agent": f"ReSkateQuickDropStudio/{current_ver}"},
                     )
                     with urllib.request.urlopen(req_dl, timeout=20.0) as dl_resp:
                         tmp_zip.write_bytes(dl_resp.read())
@@ -12743,12 +12757,19 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                 self.report({'ERROR'}, f"ReSkate Update Failed: Could not extract archive ({z_err}).")
                 return {'CANCELLED'}
 
+            known_pkg_dir_names = (
+                "sk8_prop_authoring_addon",
+                "reskate_quickdrop_studio_addon",
+                "reskate_prop_studio_addon",
+            )
             extracted_addon_dir = None
-            if (extract_root / "sk8_prop_authoring_addon" / "__init__.py").is_file():
-                extracted_addon_dir = extract_root / "sk8_prop_authoring_addon"
-            elif (extract_root / "__init__.py").is_file():
+            for pkg_dir_name in known_pkg_dir_names:
+                if (extract_root / pkg_dir_name / "__init__.py").is_file():
+                    extracted_addon_dir = extract_root / pkg_dir_name
+                    break
+            if extracted_addon_dir is None and (extract_root / "__init__.py").is_file():
                 extracted_addon_dir = extract_root
-            else:
+            if extracted_addon_dir is None:
                 for cand_init in extract_root.rglob("__init__.py"):
                     if "__MACOSX" in cand_init.parts or cand_init.name.startswith("._"):
                         continue
@@ -12788,21 +12809,24 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
             try:
                 user_scripts = Path(bpy.utils.user_resource('SCRIPTS'))
                 if user_scripts:
-                    cand_dirs.append(user_scripts / "addons" / "sk8_prop_authoring_addon")
+                    for pkg_dir_name in known_pkg_dir_names:
+                        cand_dirs.append(user_scripts / "addons" / pkg_dir_name)
             except Exception:
                 pass
             try:
                 sys_scripts = Path(bpy.utils.system_resource('SCRIPTS'))
                 if sys_scripts:
-                    cand_dirs.append(sys_scripts / "addons_core" / "sk8_prop_authoring_addon")
-                    cand_dirs.append(sys_scripts / "addons" / "sk8_prop_authoring_addon")
+                    for pkg_dir_name in known_pkg_dir_names:
+                        cand_dirs.append(sys_scripts / "addons_core" / pkg_dir_name)
+                        cand_dirs.append(sys_scripts / "addons" / pkg_dir_name)
             except Exception:
                 pass
             try:
                 import addon_utils
                 for ap in addon_utils.paths():
                     if ap:
-                        cand_dirs.append(Path(ap) / "sk8_prop_authoring_addon")
+                        for pkg_dir_name in known_pkg_dir_names:
+                            cand_dirs.append(Path(ap) / pkg_dir_name)
             except Exception:
                 pass
             try:
@@ -12810,13 +12834,14 @@ class RESKATE_OT_auto_install_update(bpy.types.Operator):
                 if ext_root and ext_root.is_dir():
                     for repo_sub in ext_root.iterdir():
                         if repo_sub.is_dir():
-                            cand_dirs.append(repo_sub / "sk8_prop_authoring_addon")
+                            for pkg_dir_name in known_pkg_dir_names:
+                                cand_dirs.append(repo_sub / pkg_dir_name)
             except Exception:
                 pass
             studio_p = compiler_bridge.get_studio_dir(context)
             if studio_p and studio_p.is_dir():
-                cand_dirs.append(studio_p / "Native" / "Blender" / "sk8_prop_authoring_addon")
-                cand_dirs.append(studio_p / "Native" / "Blender" / "reskate_prop_studio_addon")
+                for pkg_dir_name in known_pkg_dir_names:
+                    cand_dirs.append(studio_p / "Native" / "Blender" / pkg_dir_name)
 
             target_addon_dirs: list[Path] = []
             seen_resolved: set[str] = set()
